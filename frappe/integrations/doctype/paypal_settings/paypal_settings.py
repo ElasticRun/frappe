@@ -66,12 +66,12 @@ More Details:
 from __future__ import unicode_literals
 import frappe
 import json
+import pytz
 from frappe import _
-from datetime import datetime
-from frappe.utils import get_url, call_hook_method, cint, get_timestamp, cstr, now, date_diff, get_datetime
 from six.moves.urllib.parse import urlencode
 from frappe.model.document import Document
 from frappe.integrations.utils import create_request_log, make_post_request, create_payment_gateway
+from frappe.utils import get_url, call_hook_method, cint, get_datetime
 
 
 api_path = '/api/method/frappe.integrations.doctype.paypal_settings.paypal_settings'
@@ -203,7 +203,7 @@ def setup_redirect(data, redirect_url, custom_redirect_to=None, redirect=True):
 		redirect_to = custom_redirect_to
 
 	if redirect_to:
-		redirect_url += '?' + urlencode({'redirect_to': redirect_to})
+		redirect_url += '&' + urlencode({'redirect_to': redirect_to})
 	if redirect_message:
 		redirect_url += '&' + urlencode({'redirect_message': redirect_message})
 
@@ -274,7 +274,7 @@ def confirm_payment(token):
 					data.get("reference_docname")).run_method("on_payment_authorized", "Completed")
 				frappe.db.commit()
 
-			redirect_url = '/integrations/payment-success'
+			redirect_url = '/integrations/payment-success?doctype={0}&docname={1}'.format(data.get("reference_doctype"), data.get("reference_docname"))
 		else:
 			redirect_url = "/integrations/payment-failed"
 
@@ -293,8 +293,9 @@ def create_recurring_profile(token, payerid):
 		addons = data.get("addons")
 		subscription_details = data.get("subscription_details")
 
-		if data.get('subscription_id') and addons:
-			updating = True
+		if data.get('subscription_id'):
+			if addons:
+				updating = True
 			manage_recurring_payment_profile_status(data['subscription_id'], 'Cancel', params, url)
 
 		params.update({
@@ -309,8 +310,10 @@ def create_recurring_profile(token, payerid):
 			"INITAMT": data.get("upfront_amount")
 		})
 
-		starts_at = get_datetime(subscription_details.get("start_date")) or frappe.utils.now_datetime()
 		status_changed_to = 'Completed' if data.get("starting_immediately") or updating else 'Verified'
+
+		starts_at = get_datetime(subscription_details.get("start_date")) or frappe.utils.now_datetime()
+		starts_at = starts_at.replace(tzinfo=pytz.timezone(frappe.utils.get_time_zone())).astimezone(pytz.utc)
 
 		#"PROFILESTARTDATE": datetime.utcfromtimestamp(get_timestamp(starts_at)).isoformat()
 		params.update({
@@ -332,7 +335,7 @@ def create_recurring_profile(token, payerid):
 					data.get("reference_docname")).run_method("on_payment_authorized", status_changed_to)
 				frappe.db.commit()
 
-			redirect_url = '/integrations/payment-success'
+			redirect_url = '/integrations/payment-success?doctype={0}&docname={1}'.format(data.get("reference_doctype"), data.get("reference_docname"))
 		else:
 			redirect_url = "/integrations/payment-failed"
 
@@ -349,7 +352,7 @@ def update_integration_request_status(token, data, status, error=False, doc=None
 
 def get_redirect_uri(doc, token, payerid):
 	data = json.loads(doc.data)
-	
+
 	if data.get("subscription_details") or data.get("subscription_id"):
 		return get_url("{0}.create_recurring_profile?token={1}&payerid={2}".format(api_path, token, payerid))
 	else:
@@ -364,6 +367,60 @@ def manage_recurring_payment_profile_status(profile_id, action, args, url):
 
 	response = make_post_request(url, data=args)
 
-	if response.get("ACK")[0] != "Success":
+	# error code 11556 indicates profile is not in active state(or already cancelled)
+	# thus could not cancel the subscription.
+	# thus raise an exception only if the error code is not equal to 11556
+
+	if response.get("ACK")[0] != "Success" and response.get("L_ERRORCODE0", [])[0] != '11556':
 		frappe.throw(_("Failed while amending subscription"))
 
+@frappe.whitelist(allow_guest=True)
+def ipn_handler():
+	try:
+		data = frappe.local.form_dict
+
+		validate_ipn_request(data)
+
+		data.update({
+			"payment_gateway": "PayPal"
+		})
+
+		doc = frappe.get_doc({
+			"data": json.dumps(frappe.local.form_dict),
+			"doctype": "Integration Request",
+			"integration_type": "Subscription Notification",
+			"status": "Queued"
+		}).insert(ignore_permissions=True)
+		frappe.db.commit()
+
+		frappe.enqueue(method='frappe.integrations.doctype.paypal_settings.paypal_settings.handle_subscription_notification',
+			queue='long', timeout=600, is_async=True, **{"doctype": "Integration Request", "docname":  doc.name})
+
+	except frappe.InvalidStatusError:
+		pass
+	except Exception as e:
+		frappe.log(frappe.log_error(title=e))
+
+def validate_ipn_request(data):
+	def _throw():
+		frappe.throw(_("In Valid Request"), exc=frappe.InvalidStatusError)
+
+	if not data.get("recurring_payment_id"):
+		_throw()
+
+	doc = frappe.get_doc("PayPal Settings")
+	params, url = doc.get_paypal_params_and_url()
+
+	params.update({
+		"METHOD": "GetRecurringPaymentsProfileDetails",
+		"PROFILEID": data.get("recurring_payment_id")
+	})
+
+	params = urlencode(params)
+	res = make_post_request(url=url, data=params.encode("utf-8"))
+
+	if res['ACK'][0] != 'Success':
+		_throw()
+
+def handle_subscription_notification(doctype, docname):
+	call_hook_method("handle_subscription_notification", doctype=doctype, docname=docname)

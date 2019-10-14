@@ -9,7 +9,7 @@ import json
 import socket
 from frappe import _
 from frappe.model.document import Document
-from frappe.utils import validate_email_add, cint, get_datetime, DATE_FORMAT, strip, comma_or, sanitize_html
+from frappe.utils import validate_email_address, cint, get_datetime, DATE_FORMAT, strip, comma_or, sanitize_html
 from frappe.utils.user import is_system_user
 from frappe.utils.jinja import render_template
 from frappe.email.smtp import SMTPServer
@@ -23,7 +23,7 @@ from frappe.utils.background_jobs import enqueue, get_jobs
 from frappe.core.doctype.communication.email import set_incoming_outgoing_accounts
 from frappe.utils.scheduler import log
 from frappe.utils.html_utils import clean_email_html
-
+from frappe.email.utils import get_port
 
 class SentEmailInInbox(Exception): pass
 
@@ -39,7 +39,7 @@ class EmailAccount(Document):
 	def validate(self):
 		"""Validate Email Address and check POP3/IMAP and SMTP connections is enabled."""
 		if self.email_id:
-			validate_email_add(self.email_id, True)
+			validate_email_address(self.email_id, True)
 
 		if self.login_id_is_different:
 			if not self.login_id:
@@ -72,14 +72,14 @@ class EmailAccount(Document):
 				if self.enable_outgoing:
 					self.check_smtp()
 			else:
-				if self.enable_incoming or self.enable_outgoing:
+				if self.enable_incoming or (self.enable_outgoing and not self.no_smtp_authentication):
 					frappe.throw(_("Password is required or select Awaiting Password"))
 
 		if self.notify_if_unreplied:
 			if not self.send_notification_to:
 				frappe.throw(_("{0} is mandatory").format(self.meta.get_label("send_notification_to")))
 			for e in self.get_unreplied_notification_emails():
-				validate_email_add(e, True)
+				validate_email_address(e, True)
 
 		if self.enable_incoming and self.append_to:
 			valid_doctypes = [d[0] for d in get_append_to()]
@@ -90,6 +90,7 @@ class EmailAccount(Document):
 		"""Check there is only one default of each type."""
 		from frappe.core.doctype.user.user import setup_user_email_inbox
 
+		self.check_automatic_linking_email_account()
 		self.there_must_be_only_one_default()
 		setup_user_email_inbox(email_account=self.name, awaiting_password=self.awaiting_password,
 			email_id=self.email_id, enable_outgoing=self.enable_outgoing)
@@ -116,7 +117,7 @@ class EmailAccount(Document):
 			fields = [
 				"name as domain", "use_imap", "email_server",
 				"use_ssl", "smtp_server", "use_tls",
-				"smtp_port"
+				"smtp_port", "incoming_port"
 			]
 			return frappe.db.get_value("Email Domain", domain[1], fields, as_dict=True)
 		except Exception:
@@ -134,8 +135,9 @@ class EmailAccount(Document):
 				port = cint(self.smtp_port),
 				use_tls = cint(self.use_tls)
 			)
-			if self.password:
+			if self.password and not self.no_smtp_authentication:
 				server.password = self.get_password()
+
 			server.sess
 
 	def get_incoming_server(self, in_receive=False, email_sync_rule="UNSEEN"):
@@ -151,6 +153,7 @@ class EmailAccount(Document):
 			"use_imap": self.use_imap,
 			"email_sync_rule": email_sync_rule,
 			"uid_validity": self.uidvalidity,
+			"incoming_port": get_port(self),
 			"initial_sync_count": self.initial_sync_count or 100
 		})
 
@@ -386,7 +389,7 @@ class EmailAccount(Document):
 			communication._seen = json.dumps(users)
 
 		communication.flags.in_receive = True
-		communication.insert(ignore_permissions = 1)
+		communication.insert(ignore_permissions=True)
 
 		# save attachments
 		communication._attachments = email.save_attachments_in_doc(communication)
@@ -469,7 +472,7 @@ class EmailAccount(Document):
 				parent = frappe.db.get_all(self.append_to, filters={
 					self.sender_field: email.from_email,
 					self.subject_field: ("like", "%{0}%".format(subject)),
-					"creation": (">", (get_datetime() - relativedelta(days=10)).strftime(DATE_FORMAT))
+					"creation": (">", (get_datetime() - relativedelta(days=60)).strftime(DATE_FORMAT))
 				}, fields="name")
 
 				# match only subject field
@@ -478,7 +481,7 @@ class EmailAccount(Document):
 				if not parent and len(subject) > 10 and is_system_user(email.from_email):
 					parent = frappe.db.get_all(self.append_to, filters={
 						self.subject_field: ("like", "%{0}%".format(subject)),
-						"creation": (">", (get_datetime() - relativedelta(days=10)).strftime(DATE_FORMAT))
+						"creation": (">", (get_datetime() - relativedelta(days=60)).strftime(DATE_FORMAT))
 					}, fields="name")
 
 			if parent:
@@ -638,6 +641,14 @@ class EmailAccount(Document):
 		frappe.db.sql(""" update `tabCommunication` set seen={seen}
 			where name in ({docnames})""".format(docnames=docnames, seen=seen))
 
+	def check_automatic_linking_email_account(self):
+		if self.enable_automatic_linking:
+			if not self.enable_incoming:
+				frappe.throw(_("Automatic Linking can be activated only if Incoming is enabled."))
+
+			if frappe.db.exists("Email Account", {"enable_automatic_linking": 1, "name": ('!=', self.name)}):
+				frappe.throw(_("Automatic Linking can be activated only for one Email Account."))
+
 @frappe.whitelist()
 def get_append_to(doctype=None, txt=None, searchfield=None, start=None, page_len=None, filters=None):
 	if not txt: txt = ""
@@ -730,3 +741,7 @@ def get_max_email_uid(email_account):
 	else:
 		max_uid = cint(result[0].get("uid", 0)) + 1
 		return max_uid
+
+@frappe.whitelist()
+def get_automatic_email_link():
+	return frappe.db.get_value("Email Account", {"enable_incoming": 1, "enable_automatic_linking": 1}, "email_id")

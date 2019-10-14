@@ -4,15 +4,17 @@
 from __future__ import unicode_literals, print_function
 import frappe
 from frappe.model.document import Document
-from frappe.utils import cint, has_gravatar, format_datetime, now_datetime, get_formatted_email
+from frappe.utils import cint, has_gravatar, format_datetime, now_datetime, get_formatted_email, today
 from frappe import throw, msgprint, _
 from frappe.utils.password import update_password as _update_password
 from frappe.desk.notifications import clear_notifications
 from frappe.utils.user import get_system_managers
+from bs4 import BeautifulSoup
 import frappe.permissions
 import frappe.share
 import re
-from frappe.limits import get_limits
+import json
+
 from frappe.website.utils import is_signup_enabled
 from frappe.utils.background_jobs import enqueue
 
@@ -32,13 +34,13 @@ class User(Document):
 		if self.get("is_admin") or self.get("is_guest"):
 			self.name = self.first_name
 		else:
-			self.email = self.email.strip()
+			self.email = self.email.strip().lower()
 			self.name = self.email
 
 	def onload(self):
+		from frappe.config import get_modules_from_all_apps
 		self.set_onload('all_modules',
-			[m.module_name for m in frappe.db.get_all('Desktop Icon',
-				fields=['module_name'], filters={'standard': 1}, order_by="module_name")])
+			[m.get("module_name") for m in get_modules_from_all_apps()])
 
 	def before_insert(self):
 		self.flags.in_insert = True
@@ -88,12 +90,11 @@ class User(Document):
 
 	def on_update(self):
 		# clear new password
-		self.validate_user_limit()
 		self.share_with_self()
 		clear_notifications(user=self.name)
 		frappe.clear_cache(user=self.name)
 		self.send_password_notification(self.__new_password)
-		create_contact(self)
+		create_contact(self, ignore_mandatory=True)
 		if self.name not in ('Administrator', 'Guest') and not self.user_image:
 			frappe.enqueue('frappe.core.doctype.user.user.update_gravatar', name=self.name)
 
@@ -151,10 +152,6 @@ class User(Document):
 	def email_new_password(self, new_password=None):
 		if new_password and not self.flags.in_insert:
 			_update_password(user=self.name, pwd=new_password, logout_all_sessions=self.logout_all_sessions)
-
-			if self.send_password_update_notification:
-				self.password_update_mail(new_password)
-				frappe.msgprint(_("New password emailed"))
 
 	def set_system_user(self):
 		'''Set as System User if any of the given roles has desk_access'''
@@ -216,13 +213,17 @@ class User(Document):
 	def validate_reset_password(self):
 		pass
 
-	def reset_password(self, send_email=False):
+	def reset_password(self, send_email=False, password_expired=False):
 		from frappe.utils import random_string, get_url
 
 		key = random_string(32)
 		self.db_set("reset_password_key", key)
-		link = get_url("/update-password?key=" + key)
 
+		url = "/update-password?key=" + key
+		if password_expired:
+			url = "/update-password?key=" + key + '&password_expired=true'
+
+		link = get_url(url)
 		if send_email:
 			self.password_reset_mail(link)
 
@@ -244,10 +245,6 @@ class User(Document):
 	def password_reset_mail(self, link):
 		self.send_login_mail(_("Password Reset"),
 			"password_reset", {"link": link}, now=True)
-
-	def password_update_mail(self, password):
-		self.send_login_mail(_("Password Update"),
-			"password_update", {"new_password": password}, now=True)
 
 	def send_welcome_mail_to_user(self):
 		from frappe.utils import get_url
@@ -328,6 +325,12 @@ class User(Document):
 			and reference_doctype='User'
 			and (reference_name=%s or owner=%s)""", (self.name, self.name))
 
+		# unlink contact
+		frappe.db.sql("""update `tabContact`
+			set `user`=null
+			where `user`=%s""", (self.name))
+
+
 	def before_rename(self, old_name, new_name, merge=False):
 		self.check_demo()
 		frappe.clear_cache(user=old_name)
@@ -341,8 +344,8 @@ class User(Document):
 		self.validate_email_type(new_name)
 
 	def validate_email_type(self, email):
-		from frappe.utils import validate_email_add
-		validate_email_add(email.strip(), True)
+		from frappe.utils import validate_email_address
+		validate_email_address(email.strip(), True)
 
 	def after_rename(self, old_name, new_name, merge=False):
 		tables = frappe.db.get_tables()
@@ -357,6 +360,9 @@ class User(Document):
 					SET `%s` = %s
 					WHERE `%s` = %s""" %
 					(tab, field, '%s', field, '%s'), (new_name, old_name))
+
+		if frappe.db.exists("Chat Profile", old_name):
+			frappe.rename_doc("Chat Profile", old_name, new_name, force=True)
 
 		# set email
 		frappe.db.sql("""UPDATE `tabUser`
@@ -421,6 +427,9 @@ class User(Document):
 
 	def password_strength_test(self):
 		""" test password strength """
+		if self.flags.ignore_password_policy:
+			return
+
 		if self.__new_password:
 			user_data = (self.first_name, self.middle_name, self.last_name, self.email, self.birth_date)
 			result = test_password_strength(self.__new_password, '', None, user_data)
@@ -455,34 +464,6 @@ class User(Document):
 		"""Returns list of modules blocked for that user"""
 		return [d.module for d in self.block_modules] if self.block_modules else []
 
-	def validate_user_limit(self):
-		'''
-			Validate if user limit has been reached for System Users
-			Checked in 'Validate' event as we don't want welcome email sent if max users are exceeded.
-		'''
-
-		if self.user_type == "Website User":
-			return
-
-		if not self.enabled:
-			# don't validate max users when saving a disabled user
-			return
-
-		limits = get_limits()
-		if not limits.users:
-			# no limits defined
-			return
-
-		total_users = get_total_users()
-		if self.is_new():
-			# get_total_users gets existing users in database
-			# a new record isn't inserted yet, so adding 1
-			total_users += 1
-
-		if total_users > limits.users:
-			frappe.throw(_("Sorry. You have reached the maximum user limit for your subscription. You can either disable an existing user or buy a higher subscription plan."),
-				MaxUsersReachedError)
-
 	def validate_user_email_inbox(self):
 		""" check if same email account added in User Emails twice """
 
@@ -513,10 +494,7 @@ class User(Document):
 		if not self.restrict_ip:
 			return
 
-		ip_list = self.restrict_ip.replace(",", "\n").split('\n')
-		ip_list = [i.strip() for i in ip_list]
-
-		return ip_list
+		return [i.strip() for i in self.restrict_ip.split(",")]
 
 @frappe.whitelist()
 def get_timezones():
@@ -576,6 +554,9 @@ def update_password(new_password, logout_all_sessions=0, key=None, old_password=
 		frappe.cache().hdel('redirect_after_login', user)
 
 	frappe.local.login_manager.login_as(user)
+
+	frappe.db.set_value("User", user,
+		'last_password_reset_date', today())
 
 	if user_doc.user_type == "System User":
 		return "/desk"
@@ -767,7 +748,7 @@ def sign_up(email, full_name, redirect_to):
 		if frappe.db.sql("""select count(*) from tabUser where
 			HOUR(TIMEDIFF(CURRENT_TIMESTAMP, TIMESTAMP(modified)))=1""")[0][0] > 300:
 
-			frappe.respond_as_web_page(_('Temperorily Disabled'),
+			frappe.respond_as_web_page(_('Temporarily Disabled'),
 				_('Too many users signed up recently, so the registration is disabled. Please try back in an hour'),
 				http_status_code=429)
 
@@ -781,6 +762,7 @@ def sign_up(email, full_name, redirect_to):
 			"user_type": "Website User"
 		})
 		user.flags.ignore_permissions = True
+		user.flags.ignore_password_policy = True
 		user.insert()
 
 		# set default signup role as per Portal Settings
@@ -891,10 +873,9 @@ def get_active_website_users():
 def get_permission_query_conditions(user):
 	if user=="Administrator":
 		return ""
-
 	else:
 		return """(`tabUser`.name not in ({standard_users}))""".format(
-			standard_users='"' + '", "'.join(STANDARD_USERS) + '"')
+			standard_users = ", ".join(frappe.db.escape(user) for user in STANDARD_USERS))
 
 def has_permission(doc, user):
 	if (user != "Administrator") and (doc.name in STANDARD_USERS):
@@ -922,17 +903,19 @@ def notify_admin_access_to_system_manager(login_manager=None):
 		)
 
 def extract_mentions(txt):
-	"""Find all instances of @name in the string.
-	The mentions will be separated by non-word characters or may appear at the start of the string"""
-	txt = txt.replace("<br>", "<br> ")
-	txt = re.sub(r'(<[a-zA-Z\/][^>]*>)', '', txt)
-	return re.findall(r'(?:[^\w\.\-\@]|^)@([\w\.\-\@]*)', txt)
+	"""Find all instances of @mentions in the html."""
+	soup = BeautifulSoup(txt, 'html.parser')
+	emails = []
+	for mention in soup.find_all(class_='mention'):
+		email = mention['data-id']
+		emails.append(email)
+	return emails
 
 def handle_password_test_fail(result):
 	suggestions = result['feedback']['suggestions'][0] if result['feedback']['suggestions'] else ''
 	warning = result['feedback']['warning'] if 'warning' in result['feedback'] else ''
 	suggestions += "<br>" + _("Hint: Include symbols, numbers and capital letters in the password") + '<br>'
-	frappe.throw(_('Invalid Password: ' + ' '.join([warning, suggestions])))
+	frappe.throw(' '.join([_('Invalid Password:'), warning, suggestions]))
 
 def update_gravatar(name):
 	gravatar = has_gravatar(name)
@@ -1040,21 +1023,28 @@ def update_roles(role_profile):
 		user.set('roles', [])
 		user.add_roles(*roles)
 
-def create_contact(user, ignore_links=False):
+def create_contact(user, ignore_links=False, ignore_mandatory=False):
+	from frappe.contacts.doctype.contact.contact import get_contact_name
 	if user.name in ["Administrator", "Guest"]: return
 
-	if not frappe.db.get_value("Contact", {"email_id": user.email}):
-		frappe.get_doc({
+	if not get_contact_name(user.email):
+		contact = frappe.get_doc({
 			"doctype": "Contact",
 			"first_name": user.first_name,
 			"last_name": user.last_name,
-			"email_id": user.email,
 			"user": user.name,
 			"gender": user.gender,
-			"phone": user.phone,
-			"mobile_no": user.mobile_no
-		}).insert(ignore_permissions=True, ignore_links=ignore_links)
+		})
 
+		if user.email:
+			contact.add_email(user.email, is_primary=True)
+
+		if user.phone:
+			contact.add_phone(user.phone, is_primary_phone=True)
+
+		if user.mobile_no:
+			contact.add_phone(user.mobile_no, is_primary_mobile_no=True)
+		contact.insert(ignore_permissions=True, ignore_links=ignore_links, ignore_mandatory=ignore_mandatory)
 
 @frappe.whitelist()
 def generate_keys(user):

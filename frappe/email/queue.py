@@ -69,7 +69,6 @@ def send(recipients=None, sender=None, subject=None, message=None, text_content=
 	if not sender or sender == "Administrator":
 		sender = email_account.default_sender
 
-	check_email_limit(recipients)
 
 	if not text_content:
 		try:
@@ -77,19 +76,35 @@ def send(recipients=None, sender=None, subject=None, message=None, text_content=
 		except HTMLParser.HTMLParseError:
 			text_content = "See html attachment"
 
-	if reference_doctype and reference_name:
-		unsubscribed = [d.email for d in frappe.db.get_all("Email Unsubscribe", "email",
-			{"reference_doctype": reference_doctype, "reference_name": reference_name})]
+	recipients = list(set(recipients))
+	cc = list(set(cc))
 
-		unsubscribed += [d.email for d in frappe.db.get_all("Email Unsubscribe", "email",
-			{"global_unsubscribe": 1})]
-	else:
-		unsubscribed = []
+	all_ids = tuple(recipients + cc)
 
-	recipients = [r for r in list(set(recipients)) if r and r not in unsubscribed]
+	unsubscribed = frappe.db.sql_list('''
+		SELECT
+			distinct email
+		from
+			`tabEmail Unsubscribe`
+		where
+			email in %(all_ids)s
+			and (
+				(
+					reference_doctype = %(reference_doctype)s
+					and reference_name = %(reference_name)s
+				)
+				or global_unsubscribe = 1
+			)
+	''', {
+		'all_ids': all_ids,
+		'reference_doctype': reference_doctype,
+		'reference_name': reference_name,
+	})
+
+	recipients = [r for r in recipients if r and r not in unsubscribed]
 
 	if cc:
-		cc = [r for r in list(set(cc)) if r and r not in unsubscribed]
+		cc = [r for r in cc if r and r not in unsubscribed]
 
 	if not recipients and not cc:
 		# Recipients may have been unsubscribed, exit quietly
@@ -174,7 +189,8 @@ def get_email_queue(recipients, sender, subject, **kwargs):
 			if att.get('fid'):
 				_attachments.append(att)
 			elif att.get("print_format_attachment") == 1:
-				att['lang'] = frappe.local.lang
+				if not att.get('lang', None):
+					att['lang'] = frappe.local.lang
 				att['print_letterhead'] = kwargs.get('print_letterhead')
 				_attachments.append(att)
 		e.attachments = json.dumps(_attachments)
@@ -206,8 +222,9 @@ def get_email_queue(recipients, sender, subject, **kwargs):
 
 	except frappe.InvalidEmailAddressError:
 		# bad Email Address - don't add to queue
-		frappe.log_error('Invalid Email ID Sender: {0}, Recipients: {1}'.format(mail.sender,
-			', '.join(mail.recipients)), 'Email Not Sent')
+		import traceback
+		frappe.log_error('Invalid Email ID Sender: {0}, Recipients: {1}, \nTraceback: {2} '.format(mail.sender,
+			', '.join(mail.recipients), traceback.format_exc()), 'Email Not Sent')
 
 	recipients = list(set(recipients + kwargs.get('cc', []) + kwargs.get('bcc', [])))
 	e.set_recipients(recipients)
@@ -225,42 +242,11 @@ def get_email_queue(recipients, sender, subject, **kwargs):
 
 	return e
 
-def check_email_limit(recipients):
-	# if using settings from site_config.json, check email limit
-	# No limit for own email settings
-	smtp_server = SMTPServer()
-
-	if (smtp_server.email_account
-		and getattr(smtp_server.email_account, "from_site_config", False)
-		or frappe.flags.in_test):
-
-		monthly_email_limit = frappe.conf.get('limits', {}).get('emails')
-		daily_email_limit = cint(frappe.conf.get('limits', {}).get('daily_emails'))
-
-		if frappe.flags.in_test:
-			monthly_email_limit = 500
-			daily_email_limit = 50
-
-		if daily_email_limit:
-			# get count of sent mails in last 24 hours
-			today = get_emails_sent_today()
-			if (today + len(recipients)) > daily_email_limit:
-				throw(_("Cannot send this email. You have crossed the sending limit of {0} emails for this day.").format(daily_email_limit),
-					EmailLimitCrossedError)
-
-		if not monthly_email_limit:
-			return
-
-		# get count of mails sent this month
-		this_month = get_emails_sent_this_month()
-
-		if (this_month + len(recipients)) > monthly_email_limit:
-			throw(_("Cannot send this email. You have crossed the sending limit of {0} emails for this month.").format(monthly_email_limit),
-				EmailLimitCrossedError)
-
 def get_emails_sent_this_month():
-	return frappe.db.sql("""SELECT COUNT(`name`) FROM `tabEmail Queue` WHERE
-		`status`='Sent' AND EXTRACT(MONTH FROM `creation`) = EXTRACT(MONTH FROM NOW())""")[0][0]
+	return frappe.db.sql("""
+		SELECT COUNT(*) FROM `tabEmail Queue`
+		WHERE `status`='Sent' AND EXTRACT(YEAR_MONTH FROM `creation`) = EXTRACT(YEAR_MONTH FROM NOW())
+	""")[0][0]
 
 def get_emails_sent_today():
 	return frappe.db.sql("""SELECT COUNT(`name`) FROM `tabEmail Queue` WHERE
@@ -275,10 +261,7 @@ def get_unsubscribe_message(unsubscribe_message, expose_recipients):
 			target="_blank">{0}</a>'''.format(_('Unsubscribe'))
 		unsubscribe_html = _("{0} to stop receiving emails of this type").format(unsubscribe_link)
 
-	html = """<div class="email-pixel">
-			<!--email open check-->
-		</div>
-		<div class="email-unsubscribe">
+	html = """<div class="email-unsubscribe">
 			<!--cc message-->
 			<div>
 				{0}
@@ -340,7 +323,6 @@ def return_unsubscribed_page(email, doctype, name):
 def flush(from_test=False):
 	"""flush email queue, every time: called from scheduler"""
 	# additional check
-	check_email_limit([])
 
 	auto_commit = not from_test
 	if frappe.are_emails_muted():
@@ -384,7 +366,7 @@ def send_one(email, smtpserver=None, auto_commit=True, now=False, from_test=Fals
 	email = frappe.db.sql('''select
 			name, status, communication, message, sender, reference_doctype,
 			reference_name, unsubscribe_param, unsubscribe_method, expose_recipients,
-			show_as_cc, add_unsubscribe_link, attachments
+			show_as_cc, add_unsubscribe_link, attachments, retry
 		from
 			`tabEmail Queue`
 		where
@@ -446,6 +428,7 @@ def send_one(email, smtpserver=None, auto_commit=True, now=False, from_test=Fals
 			smtplib.SMTPConnectError,
 			smtplib.SMTPHeloError,
 			smtplib.SMTPAuthenticationError,
+			smtplib.SMTPRecipientsRefused,
 			JobTimeoutException):
 
 		# bad connection/timeout, retry later
@@ -466,12 +449,16 @@ def send_one(email, smtpserver=None, auto_commit=True, now=False, from_test=Fals
 	except Exception as e:
 		frappe.db.rollback()
 
-		if any("Sent" == s.status for s in recipients_list):
-			frappe.db.sql("""update `tabEmail Queue` set status='Partially Errored', error=%s where name=%s""",
-				(text_type(e), email.name), auto_commit=auto_commit)
+		if email.retry < 3:
+			frappe.db.sql("""update `tabEmail Queue` set status='Not Sent', modified=%s, retry=retry+1 where name=%s""",
+				(now_datetime(), email.name), auto_commit=auto_commit)
 		else:
-			frappe.db.sql("""update `tabEmail Queue` set status='Error', error=%s
-where name=%s""", (text_type(e), email.name), auto_commit=auto_commit)
+			if any("Sent" == s.status for s in recipients_list):
+				frappe.db.sql("""update `tabEmail Queue` set status='Partially Errored', error=%s where name=%s""",
+					(text_type(e), email.name), auto_commit=auto_commit)
+			else:
+				frappe.db.sql("""update `tabEmail Queue` set status='Error', error=%s
+					where name=%s""", (text_type(e), email.name), auto_commit=auto_commit)
 
 		if email.communication:
 			frappe.get_doc('Communication', email.communication).set_delivery_status(commit=auto_commit)
@@ -537,7 +524,7 @@ def prepare_message(email, recipient, recipients_list):
 
 		fid = attachment.get("fid")
 		if fid:
-			_file = frappe.get_doc("File", {"file_name": fid})
+			_file = frappe.get_doc("File", fid)
 			fcontent = _file.get_content()
 			attachment.update({
 				'fname': _file.file_name,

@@ -48,9 +48,9 @@ class EmailServer:
 		"""Connect to IMAP"""
 		try:
 			if cint(self.settings.use_ssl):
-				self.imap = Timed_IMAP4_SSL(self.settings.host, timeout=frappe.conf.get("pop_timeout"))
+				self.imap = Timed_IMAP4_SSL(self.settings.host, self.settings.incoming_port, timeout=frappe.conf.get("pop_timeout"))
 			else:
-				self.imap = Timed_IMAP4(self.settings.host, timeout=frappe.conf.get("pop_timeout"))
+				self.imap = Timed_IMAP4(self.settings.host, self.settings.incoming_port, timeout=frappe.conf.get("pop_timeout"))
 			self.imap.login(self.settings.username, self.settings.password)
 			# connection established!
 			return True
@@ -68,9 +68,9 @@ class EmailServer:
 		#this method return pop connection
 		try:
 			if cint(self.settings.use_ssl):
-				self.pop = Timed_POP3_SSL(self.settings.host, timeout=frappe.conf.get("pop_timeout"))
+				self.pop = Timed_POP3_SSL(self.settings.host, self.settings.incoming_port, timeout=frappe.conf.get("pop_timeout"))
 			else:
-				self.pop = Timed_POP3(self.settings.host, timeout=frappe.conf.get("pop_timeout"))
+				self.pop = Timed_POP3(self.settings.host, self.settings.incoming_port, timeout=frappe.conf.get("pop_timeout"))
 
 			self.pop.user(self.settings.username)
 			self.pop.pass_(self.settings.password)
@@ -190,12 +190,10 @@ class EmailServer:
 		# compare the UIDVALIDITY of email account and imap server
 		uid_validity = self.settings.uid_validity
 
-		responce, message = self.imap.status("Inbox", "(UIDVALIDITY UIDNEXT)")
-		current_uid_validity = self.parse_imap_responce("UIDVALIDITY", message[0])
-		if not current_uid_validity:
-			frappe.throw(_("Can not find UIDVALIDITY in imap status response"))
+		response, message = self.imap.status("Inbox", "(UIDVALIDITY UIDNEXT)")
+		current_uid_validity = self.parse_imap_response("UIDVALIDITY", message[0]) or 0
 
-		uidnext = int(self.parse_imap_responce("UIDNEXT", message[0]) or "1")
+		uidnext = int(self.parse_imap_response("UIDNEXT", message[0]) or "1")
 		frappe.db.set_value("Email Account", self.settings.email_account, "uidnext", uidnext)
 
 		if not uid_validity or uid_validity != current_uid_validity:
@@ -223,9 +221,9 @@ class EmailServer:
 		elif uid_validity == current_uid_validity:
 			return
 
-	def parse_imap_responce(self, cmd, responce):
+	def parse_imap_response(self, cmd, response):
 		pattern = r"(?<={cmd} )[0-9]*".format(cmd=cmd)
-		match = re.search(pattern, responce.decode('utf-8'), re.U | re.I)
+		match = re.search(pattern, response.decode('utf-8'), re.U | re.I)
 		if match:
 			return match.group(0)
 		else:
@@ -359,9 +357,13 @@ class Email:
 		"""Parses headers, content, attachments from given raw message.
 
 		:param content: Raw message."""
-		self.raw = safe_encode(content) if six.PY2 else safe_decode(content)
-		self.mail = email.message_from_string(self.raw)
-
+		if six.PY2:
+			self.mail = email.message_from_string(safe_encode(content))
+		else:
+			if isinstance(content, bytes):
+				self.mail = email.message_from_bytes(content)
+			else:
+				self.mail = email.message_from_string(content)
 
 		self.text_content = ''
 		self.html_content = ''
@@ -479,7 +481,7 @@ class Email:
 		"""Detect chartset."""
 		charset = part.get_content_charset()
 		if not charset:
-			charset = chardet.detect(str(part))['encoding']
+			charset = chardet.detect(frappe.safe_encode(part))['encoding']
 
 		return charset
 
@@ -553,6 +555,7 @@ class Email:
 
 # fix due to a python bug in poplib that limits it to 2048
 poplib._MAXLINE = 20480
+imaplib._MAXLINE = 20480
 
 class TimerMixin(object):
 	def __init__(self, *args, **kwargs):
@@ -582,6 +585,7 @@ class Timed_POP3(TimerMixin, poplib.POP3):
 
 class Timed_POP3_SSL(TimerMixin, poplib.POP3_SSL):
 	_super = poplib.POP3_SSL
+
 class Timed_IMAP4(TimerMixin, imaplib.IMAP4):
 	_super = imaplib.IMAP4
 

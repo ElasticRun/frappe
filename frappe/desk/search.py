@@ -49,19 +49,20 @@ def sanitize_searchfield(searchfield):
 
 # this is called by the Link Field
 @frappe.whitelist()
-def search_link(doctype, txt, query=None, filters=None, page_length=20, searchfield=None, ignore_user_permissions=False):
-	search_widget(doctype, txt, query, searchfield=searchfield, page_length=page_length, filters=filters, ignore_user_permissions=ignore_user_permissions)
+def search_link(doctype, txt, query=None, filters=None, page_length=20, searchfield=None, reference_doctype=None, ignore_user_permissions=False):
+	search_widget(doctype, txt, query, searchfield=searchfield, page_length=page_length, filters=filters, reference_doctype=reference_doctype, ignore_user_permissions=ignore_user_permissions)
 	frappe.response['results'] = build_for_autosuggest(frappe.response["values"])
 	del frappe.response["values"]
 
 # this is called by the search box
 @frappe.whitelist()
 def search_widget(doctype, txt, query=None, searchfield=None, start=0,
-	page_length=10, filters=None, filter_fields=None, as_dict=False, ignore_user_permissions=False):
+	page_length=20, filters=None, filter_fields=None, as_dict=False, reference_doctype=None, ignore_user_permissions=False):
+
+	start = cint(start)
+
 	if isinstance(filters, string_types):
 		filters = json.loads(filters)
-
-	meta = frappe.get_meta(doctype)
 
 	if searchfield:
 		sanitize_searchfield(searchfield)
@@ -80,6 +81,8 @@ def search_widget(doctype, txt, query=None, searchfield=None, start=0,
 		search_widget(doctype, txt, standard_queries[doctype][0],
 			searchfield, start, page_length, filters)
 	else:
+		meta = frappe.get_meta(doctype)
+
 		if query:
 			frappe.throw(_("This query style is discontinued"))
 			# custom query
@@ -134,7 +137,7 @@ def search_widget(doctype, txt, query=None, searchfield=None, start=0,
 			from frappe.model.db_query import get_order_by
 			order_by_based_on_meta = get_order_by(doctype, meta)
 			# 2 is the index of _relevance column
-			order_by = "2 , {0}, `tab{1}`.idx desc".format(order_by_based_on_meta, doctype)
+			order_by = "_relevance, {0}, `tab{1}`.idx desc".format(order_by_based_on_meta, doctype)
 
 			ignore_permissions = True if doctype == "DocType" else (cint(ignore_user_permissions) and has_permission(doctype))
 
@@ -142,12 +145,16 @@ def search_widget(doctype, txt, query=None, searchfield=None, start=0,
 				page_length = None
 
 			values = frappe.get_list(doctype,
-				filters=filters, fields=formatted_fields,
-				or_filters = or_filters, limit_start = start,
+				filters=filters,
+				fields=formatted_fields,
+				or_filters=or_filters,
+				limit_start=start,
 				limit_page_length=page_length,
 				order_by=order_by,
-				ignore_permissions = ignore_permissions,
-				as_list=not as_dict)
+				ignore_permissions=ignore_permissions,
+				reference_doctype=reference_doctype,
+				as_list=not as_dict,
+				strict=False)
 
 			if doctype in UNTRANSLATED_DOCTYPES:
 				values = tuple([v for v in list(values) if re.search(txt+".*", (_(v.name) if as_dict else _(v[0])), re.IGNORECASE)])
@@ -162,11 +169,17 @@ def search_widget(doctype, txt, query=None, searchfield=None, start=0,
 
 def get_std_fields_list(meta, key):
 	# get additional search fields
-	sflist = meta.search_fields and meta.search_fields.split(",") or []
-	title_field = [meta.title_field] if (meta.title_field and meta.title_field not in sflist) else []
-	sflist = ['name'] + sflist + title_field
-	if not key in sflist:
-		sflist = sflist + [key]
+	sflist = ["name"]
+	if meta.search_fields:
+		for d in meta.search_fields.split(","):
+			if d.strip() not in sflist:
+				sflist.append(d.strip())
+
+	if meta.title_field and meta.title_field not in sflist:
+		sflist.append(meta.title_field)
+
+	if key not in sflist:
+		sflist.append(key)
 
 	return sflist
 

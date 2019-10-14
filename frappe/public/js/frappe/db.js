@@ -75,14 +75,15 @@ frappe.db = {
 				method: "frappe.client.get",
 				type: 'GET',
 				args: { doctype, name, filters },
-				callback: r => resolve(r.message)
+				callback: r => {
+					frappe.model.sync(r.message);
+					resolve(r.message);
+				}
 			}).fail(reject);
 		});
 	},
 	insert: function(doc) {
-		return new Promise(resolve => {
-			frappe.call('frappe.client.insert', { doc }, r => resolve(r.message));
-		});
+		return frappe.xcall('frappe.client.insert', { doc });
 	},
 	delete_doc: function(doctype, name) {
 		return new Promise(resolve => {
@@ -96,6 +97,22 @@ frappe.db = {
 				type: 'GET',
 				args: Object.assign(args, { doctype })
 			}).then(r => resolve(r.message));
+		});
+	},
+	get_link_options(doctype, txt = '', filters={}) {
+		return new Promise(resolve => {
+			frappe.call({
+				type: 'GET',
+				method: 'frappe.desk.search.search_link',
+				args: {
+					doctype,
+					txt,
+					filters
+				},
+				callback(r) {
+					resolve(r.results);
+				}
+			});
 		});
 	}
 };

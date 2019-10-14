@@ -20,7 +20,7 @@ from datetime import datetime
 from six.moves import range
 import frappe, json, os
 from frappe.utils import cstr, cint
-from frappe.model import default_fields, no_value_fields, optional_fields, data_fieldtypes
+from frappe.model import default_fields, no_value_fields, optional_fields, data_fieldtypes, table_fields
 from frappe.model.document import Document
 from frappe.model.base_document import BaseDocument
 from frappe.modules import load_doctype_module
@@ -46,8 +46,7 @@ def load_meta(doctype):
 	return Meta(doctype)
 
 def get_table_columns(doctype):
-	return frappe.cache().hget("table_columns", doctype,
-		lambda: frappe.db.get_table_columns(doctype))
+	return frappe.db.get_table_columns(doctype)
 
 def load_doctype_from_file(doctype):
 	fname = frappe.scrub(doctype)
@@ -150,7 +149,7 @@ class Meta(Document):
 	def get_table_fields(self):
 		if not hasattr(self, "_table_fields"):
 			if self.name!="DocType":
-				self._table_fields = self.get('fields', {"fieldtype":"Table"})
+				self._table_fields = self.get('fields', {"fieldtype": ['in', table_fields]})
 			else:
 				self._table_fields = doctype_table_fields
 
@@ -232,7 +231,7 @@ class Meta(Document):
 		are to be fetched and updated for a particular link field
 
 		These fields are of type Data, Link, Text, Readonly and their
-		options property is set as `link_fieldname`.`source_fieldname`'''
+		fetch_from property is set as `link_fieldname`.`source_fieldname`'''
 
 		out = []
 
@@ -364,7 +363,7 @@ class Meta(Document):
 
 	def set_custom_permissions(self):
 		'''Reset `permissions` with Custom DocPerm if exists'''
-		if frappe.flags.in_patch or frappe.flags.in_import or frappe.flags.in_install:
+		if frappe.flags.in_patch or frappe.flags.in_install:
 			return
 
 		if not self.istable and self.name not in ('DocType', 'DocField', 'DocPerm',
@@ -408,8 +407,10 @@ class Meta(Document):
 	def get_dashboard_data(self):
 		'''Returns dashboard setup related to this doctype.
 
-		This method will return the `data` property in the
-		`[doctype]_dashboard.py` file in the doctype folder'''
+		This method will return the `data` property in the `[doctype]_dashboard.py`
+		file in the doctype's folder, along with any overrides or extensions
+		implemented in other Frappe applications via hooks.
+		'''
 		data = frappe._dict()
 		try:
 			module = load_doctype_module(self.name, suffix='_dashboard')
@@ -417,6 +418,9 @@ class Meta(Document):
 				data = frappe._dict(module.get_data())
 		except ImportError:
 			pass
+
+		for hook in frappe.get_hooks("override_doctype_dashboards", {}).get(self.name, []):
+			data = frappe.get_attr(hook)(data=data)
 
 		return data
 
@@ -451,7 +455,7 @@ def is_single(doctype):
 		raise Exception('Cannot determine whether %s is single' % doctype)
 
 def get_parent_dt(dt):
-	parent_dt = frappe.db.get_all('DocField', 'parent', dict(fieldtype='Table', options=dt), limit=1)
+	parent_dt = frappe.db.get_all('DocField', 'parent', dict(fieldtype=['in', frappe.model.table_fields], options=dt), limit=1)
 	return parent_dt and parent_dt[0].parent or ''
 
 def set_fieldname(field_id, fieldname):
@@ -477,7 +481,7 @@ def get_field_currency(df, doc=None):
 
 		if ":" in cstr(df.get("options")):
 			split_opts = df.get("options").split(":")
-			if len(split_opts)==3:
+			if len(split_opts)==3 and doc.get(split_opts[1]):
 				currency = frappe.get_cached_value(split_opts[0], doc.get(split_opts[1]), split_opts[2])
 		else:
 			currency = doc.get(df.get("options"))

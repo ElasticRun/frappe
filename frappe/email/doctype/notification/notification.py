@@ -8,7 +8,7 @@ import json, os
 from frappe import _
 from frappe.model.document import Document
 from frappe.core.doctype.role.role import get_emails_from_role
-from frappe.utils import validate_email_add, nowdate, parse_val, is_html, add_to_date
+from frappe.utils import validate_email_address, nowdate, parse_val, is_html, add_to_date
 from frappe.utils.jinja import validate_template
 from frappe.modules.utils import export_module_json, get_doc_module
 from six import string_types
@@ -126,9 +126,14 @@ def get_context(context):
 			self.send_a_slack_msg(doc, context)
 
 		if self.set_property_after_alert:
-			frappe.db.set_value(doc.doctype, doc.name, self.set_property_after_alert,
-				self.property_value, update_modified = False)
-			doc.set(self.set_property_after_alert, self.property_value)
+			allow_update = True
+			if doc.docstatus == 1 and not doc.meta.get_field(self.set_property_after_alert).allow_on_submit:
+				allow_update = False
+
+			if allow_update:
+				frappe.db.set_value(doc.doctype, doc.name, self.set_property_after_alert,
+					self.property_value, update_modified = False)
+				doc.set(self.set_property_after_alert, self.property_value)
 
 	def send_an_email(self, doc, context):
 		from email.utils import formataddr
@@ -137,17 +142,22 @@ def get_context(context):
 			subject = frappe.render_template(self.subject, context)
 
 		attachments = self.get_attachment(doc)
-		recipients = self.get_list_of_recipients(doc, context)
+		recipients, cc, bcc = self.get_list_of_recipients(doc, context)
+		if not (recipients or cc or bcc):
+			return
 		sender = None
 		if self.sender and self.sender_email:
 			sender = formataddr((self.sender, self.sender_email))
-
-		frappe.sendmail(recipients=recipients, subject=subject,
-			sender=sender,
-			message= frappe.render_template(self.message, context),
+		frappe.sendmail(recipients = recipients,
+			subject = subject,
+			sender = sender,
+			cc = cc,
+			bcc = bcc,
+			message = frappe.render_template(self.message, context),
 			reference_doctype = doc.doctype,
 			reference_name = doc.name,
 			attachments = attachments,
+			expose_recipients="header",
 			print_letterhead = ((attachments
 				and attachments[0].get('print_letterhead')) or False))
 
@@ -160,13 +170,15 @@ def get_context(context):
 
 	def get_list_of_recipients(self, doc, context):
 		recipients = []
+		cc = []
+		bcc = []
 		for recipient in self.recipients:
 			if recipient.condition:
 				if not frappe.safe_eval(recipient.condition, None, context):
 					continue
 			if recipient.email_by_document_field:
 				email_ids_value = doc.get(recipient.email_by_document_field)
-				if validate_email_add(email_ids_value):
+				if validate_email_address(email_ids_value):
 					email_ids = email_ids_value.replace(",", "\n")
 					recipients = recipients + email_ids.split("\n")
 
@@ -177,7 +189,14 @@ def get_context(context):
 
 			if recipient.cc:
 				recipient.cc = recipient.cc.replace(",", "\n")
-				recipients = recipients + recipient.cc.split("\n")
+				cc = cc + recipient.cc.split("\n")
+
+			if recipient.bcc and "{" in recipient.bcc:
+				recipient.bcc = frappe.render_template(recipient.bcc, context)
+
+			if recipient.bcc:
+				recipient.bcc = recipient.bcc.replace(",", "\n")
+				bcc = bcc + recipient.bcc.split("\n")
 
 			#For sending emails to specified role
 			if recipient.email_by_role:
@@ -186,10 +205,9 @@ def get_context(context):
 				for email in emails:
 					recipients = recipients + email.split("\n")
 
-		if not recipients:
-			return
-
-		return list(set(recipients))
+		if not recipients and not cc and not bcc:
+			return None, None, None
+		return list(set(recipients)), list(set(cc)), list(set(bcc))
 
 	def get_attachment(self, doc):
 		""" check print settings are attach the pdf """
@@ -206,8 +224,15 @@ def get_context(context):
 				please enable Allow Print For {0} in Print Settings""".format(status)),
 				title=_("Error in Notification"))
 		else:
-			return [{"print_format_attachment":1, "doctype":doc.doctype, "name": doc.name,
-				"print_format":self.print_format, "print_letterhead": print_settings.with_letterhead}]
+			return [{
+				"print_format_attachment": 1,
+				"doctype": doc.doctype,
+				"name": doc.name,
+				"print_format": self.print_format,
+				"print_letterhead": print_settings.with_letterhead,
+				"lang": frappe.db.get_value('Print Format', self.print_format, 'default_print_language')
+					if self.print_format else 'en'
+			}]
 
 
 	def get_template(self):
@@ -286,22 +311,20 @@ def evaluate_alert(doc, alert, event):
 				else:
 					raise
 			db_value = parse_val(db_value)
-			if (doc.get(alert.value_changed) == db_value) or \
-				(not db_value and not doc.get(alert.value_changed)):
-
+			if (doc.get(alert.value_changed) == db_value) or (not db_value and not doc.get(alert.value_changed)):
 				return # value not changed
 
 		if event != "Value Change" and not doc.is_new():
 			# reload the doc for the latest values & comments,
 			# except for validate type event.
 			doc = frappe.get_doc(doc.doctype, doc.name)
-
 		alert.send(doc)
 	except TemplateError:
 		frappe.throw(_("Error while evaluating Notification {0}. Please fix your template.").format(alert))
 	except Exception as e:
-		frappe.log_error(message=frappe.get_traceback(), title=str(e))
-		frappe.throw(_("Error in Notification"))
+		error_log = frappe.log_error(message=frappe.get_traceback(), title=str(e))
+		frappe.throw(_("Error in Notification: {}".format(
+			frappe.utils.get_link_to_form('Error Log', error_log.name))))
 
 def get_context(doc):
 	return {"doc": doc, "nowdate": nowdate, "frappe.utils": frappe.utils}

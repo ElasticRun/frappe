@@ -4,12 +4,12 @@
 from __future__ import unicode_literals
 import frappe
 from frappe import _
-from six.moves import xrange
+
 
 def get_monthly_results(goal_doctype, goal_field, date_col, filter_str, aggregation = 'sum'):
 	'''Get monthly aggregation values for given field of doctype'''
 	# TODO: move to ORM?
-	if(frappe.conf.db_type == 'postgres'):
+	if(frappe.db.db_type == 'postgres'):
 		month_year_format_query = '''to_char("{}", 'MM-YYYY')'''.format(date_col)
 	else:
 		month_year_format_query = 'date_format(`{}`, "%m-%Y")'.format(date_col)
@@ -76,7 +76,7 @@ def get_monthly_goal_graph_data(title, doctype, docname, goal_value_field, goal_
 		month_to_value_dict = None
 
 	if month_to_value_dict is None:
-		doc_filter = (goal_doctype_link + " = '" + docname + "'") if doctype != goal_doctype else ''
+		doc_filter = (goal_doctype_link + " = " + frappe.db.escape(docname)) if doctype != goal_doctype else ''
 		if filter_str:
 			doc_filter += ' and ' + filter_str if doc_filter else filter_str
 		month_to_value_dict = get_monthly_results(goal_doctype, goal_field, date_field, doc_filter, aggregation)
@@ -91,7 +91,7 @@ def get_monthly_goal_graph_data(title, doctype, docname, goal_value_field, goal_
 	for i in range(0, 12):
 		date_value = add_months(today(), -i)
 		month_value = formatdate(date_value, "MM-yyyy")
-		month_word = getdate(date_value).strftime('%b')
+		month_word = getdate(date_value).strftime('%b %y')
 		month_year = getdate(date_value).strftime('%B') + ', ' + getdate(date_value).strftime('%Y')
 		months.insert(0, month_word)
 		months_formatted.insert(0, month_year)
@@ -144,10 +144,12 @@ def get_monthly_goal_graph_data(title, doctype, docname, goal_value_field, goal_
 				}
 			],
 			'labels': months,
-			'yMarkers': y_markers
 		},
 
 		'summary': summary_values,
 	}
+
+	if y_markers:
+		data["data"]["yMarkers"] = y_markers
 
 	return data

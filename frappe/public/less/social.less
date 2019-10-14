@@ -11,9 +11,6 @@ body[data-route*="social"] {
 	}
 	.liked-by-popover {
 		font-size: @text-small;
-		li {
-			margin: 10px 0px;
-		}
 	}
 
 	.wall-container {
@@ -44,7 +41,7 @@ body[data-route*="social"] {
 			padding: 15px;
 			flex: 25%;
 			.event {
-				margin: 15px 0;
+				margin-bottom: 15px;
 			}
 		}
 	}
@@ -56,6 +53,7 @@ body[data-route*="social"] {
 		min-height: 70px;
 		border: 1px solid @border-color;
 		border-radius: 4px;
+		overflow: hidden;
 		.content {
 			font-size: 14px;
 			img, iframe {
@@ -90,20 +88,26 @@ body[data-route*="social"] {
 			.content {
 				margin: 15px 0 0 46px;
 			}
+			.post-dropdown-menu {
+				display: none;
+				padding-left: 10px;
+				line-height: 1;
+			}
 		}
 		.pin-option {
-			.text-extra-muted;
+			.text-muted;
+			text-transform: uppercase;
+			font-size: @text-small;
 			display: none;
 		}
 		.pinned {
 			background: #fefdf2;
 			.pin-option {
-				.text-muted;
 				display: block;
 			}
 		}
 		&:hover {
-			.pin-option {
+			.post-dropdown-menu {
 				display: block;
 			}
 		}
@@ -137,7 +141,7 @@ body[data-route*="social"] {
 
 	.muted-title {
 		&:extend(.text-muted);
-		margin-bottom: 15px;
+		margin-bottom: 10px;
 		text-transform: uppercase;
 		font-size: 10px;
 		font-weight: 600;

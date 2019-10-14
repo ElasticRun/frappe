@@ -5,7 +5,8 @@ from __future__ import unicode_literals
 import frappe, json
 import frappe.desk.form.meta
 import frappe.desk.form.load
-from frappe.utils.html_utils import clean_email_html
+from frappe.desk.form.document_follow import follow_document
+from frappe.utils.file_manager import extract_images_from_html
 
 from frappe import _
 from six import string_types
@@ -16,7 +17,6 @@ def remove_attach():
 	fid = frappe.form_dict.get('fid')
 	file_name = frappe.form_dict.get('file_name')
 	frappe.delete_doc('File', fid)
-
 
 @frappe.whitelist()
 def validate_link():
@@ -57,23 +57,25 @@ def validate_link():
 		frappe.response['message'] = 'Ok'
 
 @frappe.whitelist()
-def add_comment(doc):
+def add_comment(reference_doctype, reference_name, content, comment_email):
 	"""allow any logged user to post a comment"""
-	doc = frappe.get_doc(json.loads(doc))
+	doc = frappe.get_doc(dict(
+		doctype = 'Comment',
+		reference_doctype = reference_doctype,
+		reference_name = reference_name,
+		comment_email = comment_email,
+		comment_type = 'Comment'
+	))
+	doc.content = extract_images_from_html(doc, content)
+	doc.insert(ignore_permissions = True)
 
-	doc.content = clean_email_html(doc.content)
-
-	if not (doc.doctype=="Communication" and doc.communication_type=='Comment'):
-		frappe.throw(_("This method can only be used to create a Comment"), frappe.PermissionError)
-
-	doc.insert(ignore_permissions=True)
-
+	follow_document(doc.reference_doctype, doc.reference_name, frappe.session.user)
 	return doc.as_dict()
 
 @frappe.whitelist()
 def update_comment(name, content):
 	"""allow only owner to update comment"""
-	doc = frappe.get_doc('Communication', name)
+	doc = frappe.get_doc('Comment', name)
 
 	if frappe.session.user not in ['Administrator', doc.owner]:
 		frappe.throw(_('Comment can only be edited by the owner'), frappe.PermissionError)
@@ -82,27 +84,23 @@ def update_comment(name, content):
 	doc.save(ignore_permissions=True)
 
 @frappe.whitelist()
-def get_next(doctype, value, prev, filters=None, order_by="modified desc"):
+def get_next(doctype, value, prev, filters, sort_order, sort_field):
 
-	prev = not int(prev)
-	sort_field, sort_order = order_by.split(" ")
-
+	prev = int(prev)
 	if not filters: filters = []
 	if isinstance(filters, string_types):
 		filters = json.loads(filters)
 
-	# condition based on sort order
-	condition = ">" if sort_order.lower()=="desc" else "<"
+	# # condition based on sort order
+	condition = ">" if sort_order.lower() == "asc" else "<"
 
 	# switch the condition
 	if prev:
-		condition = "<" if condition==">" else "<"
-	else:
-		sort_order = "asc" if sort_order.lower()=="desc" else "desc"
+		sort_order = "asc" if sort_order.lower() == "desc" else "desc"
+		condition = "<" if condition == ">" else ">"
 
-	# add condition for next or prev item
-	if not order_by[0] in [f[1] for f in filters]:
-		filters.append([doctype, sort_field, condition, value])
+	# # add condition for next or prev item
+	filters.append([doctype, sort_field, condition, frappe.get_value(doctype, value, sort_field)])
 
 	res = frappe.get_list(doctype,
 		fields = ["name"],

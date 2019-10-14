@@ -119,7 +119,6 @@ class RazorpaySettings(Document):
 						"content-type": "application/json"
 					}
 				)
-
 				if not resp.get('id'):
 					frappe.log_error(str(resp), 'Razorpay Failed while creating subscription')
 		except:
@@ -133,10 +132,12 @@ class RazorpaySettings(Document):
 
 		subscription_details = {
 			"plan_id": kwargs.get('subscription_details').get("plan_id"),
-			"start_at": cint(start_date),
 			"total_count": kwargs.get('subscription_details').get("billing_frequency"),
 			"customer_notify": kwargs.get('subscription_details').get("customer_notify")
 		}
+
+		if start_date:
+			subscription_details['start_at'] = cint(start_date)
 
 		if kwargs.get('addons'):
 			convert_rupee_to_paisa(**kwargs)
@@ -239,8 +240,8 @@ class RazorpaySettings(Document):
 
 		status = frappe.flags.integration_request.status_code
 
-		redirect_to = data.get('notes', {}).get('redirect_to') or None
-		redirect_message = data.get('notes', {}).get('redirect_message') or None
+		redirect_to = data.get('redirect_to') or None
+		redirect_message = data.get('redirect_message') or None
 
 		if self.flags.status_changed_to in ("Authorized", "Verified", "Completed"):
 			if self.data.reference_doctype and self.data.reference_docname:
@@ -256,12 +257,12 @@ class RazorpaySettings(Document):
 				if custom_redirect_to:
 					redirect_to = custom_redirect_to
 
-			redirect_url = 'payment-success'
+			redirect_url = 'payment-success?doctype={0}&docname={1}'.format(self.data.reference_doctype, self.data.reference_docname)
 		else:
 			redirect_url = 'payment-failed'
 
 		if redirect_to:
-			redirect_url += '?' + urlencode({'redirect_to': redirect_to})
+			redirect_url += '&' + urlencode({'redirect_to': redirect_to})
 		if redirect_message:
 			redirect_url += '&' + urlencode({'redirect_message': redirect_message})
 
@@ -283,13 +284,12 @@ class RazorpaySettings(Document):
 			})
 
 		return settings
-	
-	
+
 	def cancel_subscription(self, subscription_id):
-		settings = self.get_settings()
-		
+		settings = self.get_settings({})
+
 		try:
-			resp = make_get_request("https://api.razorpay.com/v1/subscriptions/{0}/cancel"
+			resp = make_post_request("https://api.razorpay.com/v1/subscriptions/{0}/cancel"
 				.format(subscription_id), auth=(settings.api_key,
 					settings.api_secret))
 		except Exception:
@@ -314,8 +314,12 @@ def capture_payment(is_sandbox=False, sanbox_response=None):
 				data = json.loads(doc.data)
 				settings = controller.get_settings(data)
 
-				resp = make_post_request("https://api.razorpay.com/v1/payments/{0}/capture".format(data.get("razorpay_payment_id")),
+				resp = make_get_request("https://api.razorpay.com/v1/payments/{0}".format(data.get("razorpay_payment_id")),
 					auth=(settings.api_key, settings.api_secret), data={"amount": data.get("amount")})
+
+				if resp.get('status') == "authorized":
+					resp = make_post_request("https://api.razorpay.com/v1/payments/{0}/capture".format(data.get("razorpay_payment_id")),
+						auth=(settings.api_key, settings.api_secret), data={"amount": data.get("amount")})
 
 			if resp.get("status") == "captured":
 				frappe.db.set_value("Integration Request", doc.name, "status", "Completed")
@@ -329,5 +333,54 @@ def capture_payment(is_sandbox=False, sanbox_response=None):
 def convert_rupee_to_paisa(**kwargs):
 	for addon in kwargs.get('addons'):
 		addon['item']['amount'] *= 100
-	
+
 	frappe.conf.converted_rupee_to_paisa = True
+
+@frappe.whitelist(allow_guest=True)
+def razorpay_subscription_callback():
+	try:
+		data = frappe.local.form_dict
+
+		validate_payment_callback(data)
+
+		data.update({
+			"payment_gateway": "Razorpay"
+		})
+
+		doc = frappe.get_doc({
+			"data": json.dumps(frappe.local.form_dict),
+			"doctype": "Integration Request",
+			"integration_type": "Subscription Notification",
+			"status": "Queued"
+		}).insert(ignore_permissions=True)
+		frappe.db.commit()
+
+		frappe.enqueue(method='frappe.integrations.doctype.razorpay_settings.razorpay_settings.handle_subscription_notification',
+			queue='long', timeout=600, is_async=True, **{"doctype": "Integration Request", "docname":  doc.name})
+
+	except frappe.InvalidStatusError:
+		pass
+	except Exception as e:
+		frappe.log(frappe.log_error(title=e))
+
+def validate_payment_callback(data):
+	def _throw():
+		frappe.throw(_("Invalid Subscription"), exc=frappe.InvalidStatusError)
+
+	subscription_id = data.get('payload').get("subscription").get("entity").get("id")
+
+	if not(subscription_id):
+		_throw()
+
+	controller = frappe.get_doc("Razorpay Settings")
+
+	settings = controller.get_settings(data)
+
+	resp = make_get_request("https://api.razorpay.com/v1/subscriptions/{0}".format(subscription_id),
+		auth=(settings.api_key, settings.api_secret))
+
+	if resp.get("status") != "active":
+		_throw()
+
+def handle_subscription_notification(doctype, docname):
+	call_hook_method("handle_subscription_notification", doctype=doctype, docname=docname)

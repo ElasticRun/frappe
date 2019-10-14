@@ -7,14 +7,13 @@ import frappe
 import frappe.utils
 from frappe import throw, _
 from frappe.website.website_generator import WebsiteGenerator
-from frappe.email.queue import check_email_limit
 from frappe.utils.verified_command import get_signed_params, verify_request
 from frappe.utils.background_jobs import enqueue
 from frappe.utils.scheduler import log
 from frappe.email.queue import send
 from frappe.email.doctype.email_group.email_group import add_subscribers
 from frappe.utils import parse_addr
-from frappe.utils import validate_email_add
+from frappe.utils import validate_email_address
 
 
 class Newsletter(WebsiteGenerator):
@@ -27,7 +26,7 @@ class Newsletter(WebsiteGenerator):
 	def validate(self):
 		self.route = "newsletters/" + self.name
 		if self.send_from:
-			validate_email_add(self.send_from, True)
+			validate_email_address(self.send_from, True)
 
 	def test_send(self, doctype="Lead"):
 		self.recipients = frappe.utils.split_emails(self.test_email_id)
@@ -41,20 +40,23 @@ class Newsletter(WebsiteGenerator):
 
 		self.recipients = self.get_recipients()
 
-		if getattr(frappe.local, "is_ajax", False):
-			self.validate_send()
+		if self.recipients:
+			if getattr(frappe.local, "is_ajax", False):
+				self.validate_send()
 
-			# using default queue with a longer timeout as this isn't a scheduled task
-			enqueue(send_newsletter, queue='default', timeout=6000, event='send_newsletter',
-				newsletter=self.name)
+				# using default queue with a longer timeout as this isn't a scheduled task
+				enqueue(send_newsletter, queue='default', timeout=6000, event='send_newsletter',
+					newsletter=self.name)
 
+			else:
+				self.queue_all()
+
+			frappe.msgprint(_("Scheduled to send to {0} recipients").format(len(self.recipients)))
+
+			frappe.db.set(self, "email_sent", 1)
+			frappe.db.set(self, 'scheduled_to_send', len(self.recipients))
 		else:
-			self.queue_all()
-
-		frappe.msgprint(_("Scheduled to send to {0} recipients").format(len(self.recipients)))
-
-		frappe.db.set(self, "email_sent", 1)
-		frappe.db.set(self, 'scheduled_to_send', len(self.recipients))
+			frappe.msgprint(_("Newsletter should have atleast one recipient"))
 
 	def queue_all(self):
 		if not self.get("recipients"):
@@ -85,7 +87,7 @@ class Newsletter(WebsiteGenerator):
 			subject = self.subject, message = self.message,
 			reference_doctype = self.doctype, reference_name = self.name,
 			add_unsubscribe_link = self.send_unsubscribe_link, attachments=attachments,
-			unsubscribe_method = "/api/method/frappe.email.doctype.newsletter.newsletter.unsubscribe",
+			unsubscribe_method = "/unsubscribe",
 			unsubscribe_params = {"name": self.name},
 			send_priority = 0, queue_separately=True)
 
@@ -104,7 +106,6 @@ class Newsletter(WebsiteGenerator):
 	def validate_send(self):
 		if self.get("__islocal"):
 			throw(_("Please save the Newsletter before sending"))
-		check_email_limit(self.recipients)
 
 	def get_context(self, context):
 		newsletters = get_newsletter_list("Newsletter", None, None, 0)
@@ -132,33 +133,13 @@ def get_email_groups(name):
 
 
 @frappe.whitelist(allow_guest=True)
-def unsubscribe(email, name):
-	if not verify_request():
-		return
-
-	primary_action = frappe.utils.get_url() + "/api/method/frappe.email.doctype.newsletter.newsletter.confirmed_unsubscribe"+\
-		"?" + get_signed_params({"email": email, "name":name})
-	return_confirmation_page(email, name, primary_action)
-
-
-@frappe.whitelist(allow_guest=True)
-def confirmed_unsubscribe(email, name):
-	if not verify_request():
-		return
-
-	for email_group in get_email_groups(name):
-		frappe.db.sql('''update `tabEmail Group Member` set unsubscribed=1 where email=%s and email_group=%s''',(email, email_group.email_group))
-
-	frappe.db.commit()
-	return_unsubscribed_page(email, name)
-
-def return_confirmation_page(email, name, primary_action):
-	frappe.respond_as_web_page(_("Unsubscribe from Newsletter"),_("Do you want to unsubscribe from this mailing list?"),
-		indicator_color="blue", primary_label = _("Unsubscribe"), primary_action=primary_action)
-
-def return_unsubscribed_page(email, name):
-	frappe.respond_as_web_page(_("Unsubscribed from Newsletter"),
-		_("<b>{0}</b> has been successfully unsubscribed from this mailing list.").format(email, name), indicator_color='green')
+def confirmed_unsubscribe(email, group):
+	""" unsubscribe the email(user) from the mailing list(email_group) """
+	frappe.flags.ignore_permissions=True
+	doc = frappe.get_doc("Email Group Member", {"email": email, "email_group": group})
+	if not doc.unsubscribed:
+		doc.unsubscribed = 1
+		doc.save(ignore_permissions = True)
 
 def create_lead(email_id):
 	"""create a lead if it does not exist"""

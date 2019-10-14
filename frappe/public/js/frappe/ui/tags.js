@@ -36,7 +36,8 @@ frappe.ui.Tags = class {
 	bind() {
 		this.$input.keypress((e) => {
 			if(e.which == 13 || e.keyCode == 13) {
-				this.addTag(this.$input.val());
+				const tagValue = frappe.utils.xss_sanitise(this.$input.val());
+				this.addTag(tagValue);
 				this.$input.val('');
 			}
 		});
@@ -66,7 +67,6 @@ frappe.ui.Tags = class {
 	}
 
 	addTag(label) {
-		label = toTitle(label);
 		if(label && label!== '' && !this.tagsList.includes(label)) {
 			let $tag = this.getTag(label);
 			this.getListElement($tag).insertBefore(this.$inputWrapper);
@@ -76,13 +76,9 @@ frappe.ui.Tags = class {
 	}
 
 	removeTag(label) {
+		label = frappe.utils.xss_sanitise(label);
 		if(this.tagsList.includes(label)) {
-			let $tag = this.$ul.find(`.frappe-tag[data-tag-label="${label}"]`);
-
-			// Just don't remove tag, but also the li DOM.
-			$tag.parent('.tags-list-item').remove();
 			this.tagsList.splice(this.tagsList.indexOf(label), 1);
-
 			this.onTagRemove && this.onTagRemove(label);
 		}
 	}
@@ -118,6 +114,7 @@ frappe.ui.Tags = class {
 
 		$removeTag.on("click", () => {
 			this.removeTag($removeTag.attr('data-tag-label'));
+			$removeTag.closest('.tags-list-item').remove();
 		});
 
 		if(this.onTagClick) {

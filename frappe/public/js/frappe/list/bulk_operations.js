@@ -90,7 +90,7 @@ export default class BulkOperations {
 
 	assign(docnames, done) {
 		if (docnames.length > 0) {
-			const dialog = new frappe.ui.form.AssignToDialog({
+			const assign_to = new frappe.ui.form.AssignToDialog({
 				obj: this,
 				method: 'frappe.desk.form.assign_to.add_multiple',
 				doctype: this.doctype,
@@ -99,10 +99,19 @@ export default class BulkOperations {
 				re_assign: true,
 				callback: done
 			});
-			dialog.clear();
-			dialog.show();
+			assign_to.dialog.clear();
+			assign_to.dialog.show();
 		} else {
 			frappe.msgprint(__('Select records for assignment'));
+		}
+	}
+
+	apply_assignment_rule(docnames, done) {
+		if (docnames.length > 0) {
+			frappe.call('frappe.automation.doctype.assignment_rule.assignment_rule.bulk_apply', {
+				doctype: this.doctype,
+				docnames: docnames
+			}).then(() => done());
 		}
 	}
 
@@ -181,6 +190,7 @@ export default class BulkOperations {
 					}
 					done();
 					dialog.hide();
+					frappe.show_alert(__('Updated successfully'));
 				});
 			},
 			primary_action_label: __('Update')

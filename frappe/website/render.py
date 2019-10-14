@@ -30,6 +30,7 @@ def render(path=None, http_status_code=None):
 
 	try:
 		path = path.strip('/ ')
+		raise_if_disabled(path)
 		resolve_redirect(path)
 		path = resolve_path(path)
 		data = None
@@ -40,10 +41,12 @@ def render(path=None, http_status_code=None):
 			http_status_code = 404
 		elif is_static_file(path):
 			return get_static_file_response()
+		elif is_web_form(path):
+			data = render_web_form(path)
 		else:
 			try:
 				data = render_page_by_language(path)
-			except frappe.DoesNotExistError as e:
+			except frappe.DoesNotExistError:
 				doctype, name = get_doctype_from_path(path)
 				if doctype and name:
 					path = "printview"
@@ -67,6 +70,9 @@ def render(path=None, http_status_code=None):
 			except frappe.PermissionError as e:
 				data, http_status_code = render_403(e, path)
 
+			except frappe.Redirect as e:
+				raise e
+
 			except Exception:
 				path = "error"
 				data = render_page(path)
@@ -74,7 +80,7 @@ def render(path=None, http_status_code=None):
 
 		data = add_csrf_token(data)
 
-	except frappe.Redirect as e:
+	except frappe.Redirect:
 		return build_response(path, "", 301, {
 			"Location": frappe.flags.redirect_location or (frappe.local.response or {}).get('location'),
 			"Cache-Control": "no-store, no-cache, must-revalidate"
@@ -96,6 +102,13 @@ def is_static_file(path):
 			return True
 
 	return False
+
+def is_web_form(path):
+	return bool(frappe.get_all("Web Form", filters={'route': path}))
+
+def render_web_form(path):
+	data = render_page(path)
+	return data
 
 def get_static_file_response():
 	try:
@@ -173,9 +186,6 @@ def build_page(path):
 		frappe.local.path = path
 
 	context = get_context(path)
-	if context.title and "{{" in cstr(context.title):
-		title_template = context.pop('title')
-		context.title = frappe.render_template(title_template, context)
 
 	if context.source:
 		html = frappe.render_template(context.source, context)
@@ -221,7 +231,9 @@ def resolve_path(path):
 def resolve_from_map(path):
 	m = Map([Rule(r["from_route"], endpoint=r["to_route"], defaults=r.get("defaults"))
 		for r in get_website_rules()])
-	urls = m.bind_to_environ(frappe.local.request.environ)
+
+	if frappe.local.request:
+		urls = m.bind_to_environ(frappe.local.request.environ)
 	try:
 		endpoint, args = urls.match("/" + path)
 		path = endpoint
@@ -324,3 +336,17 @@ def add_csrf_token(data):
 				frappe.local.session.data.csrf_token))
 	else:
 		return data
+
+def raise_if_disabled(path):
+	routes = frappe.db.get_all('Portal Menu Item',
+		fields=['route', 'enabled'],
+		filters={
+			'enabled': 0,
+			'route': ['like', '%{0}'.format(path)]
+		}
+	)
+
+	for r in routes:
+		_path = r.route.lstrip('/')
+		if path == _path and not r.enabled:
+			raise frappe.PermissionError

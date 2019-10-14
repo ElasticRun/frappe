@@ -6,7 +6,11 @@ frappe.views.BaseList = class BaseList {
 	}
 
 	show() {
-		this.init().then(() => this.refresh());
+		frappe.run_serially([
+			() => this.init(),
+			() => this.before_refresh(),
+			() => this.refresh()
+		]);
 	}
 
 	init() {
@@ -99,7 +103,9 @@ frappe.views.BaseList = class BaseList {
 			}
 			return f;
 		});
-		//de-dup
+		// remove null or undefined values
+		this.fields = this.fields.filter(Boolean);
+		//de-duplicate
 		this.fields = this.fields.uniqBy(f => f[0] + f[1]);
 	}
 
@@ -170,7 +176,7 @@ frappe.views.BaseList = class BaseList {
 			if (item.condition && item.condition() === false) {
 				return;
 			}
-			const $item = this.page.add_menu_item(item.label, item.action, item.standard);
+			const $item = this.page.add_menu_item(item.label, item.action, item.standard, item.shortcut);
 			if (item.class) {
 				$item && $item.addClass(item.class);
 			}
@@ -193,13 +199,21 @@ frappe.views.BaseList = class BaseList {
 	}
 
 	toggle_side_bar() {
-		this.list_sidebar.parent.toggleClass('hide');
-		this.page.current_view.find('.layout-main-section-wrapper').toggleClass('col-md-10 col-md-12');
+		let show_sidebar = JSON.parse(localStorage.show_sidebar || 'true');
+		show_sidebar = !show_sidebar;
+		localStorage.show_sidebar = show_sidebar;
+		this.show_or_hide_sidebar();
+	}
+
+	show_or_hide_sidebar() {
+		let show_sidebar = JSON.parse(localStorage.show_sidebar || 'true');
+		$(document.body).toggleClass('no-sidebar', !show_sidebar);
 	}
 
 	setup_main_section() {
 		return frappe.run_serially([
 			this.setup_list_wrapper,
+			this.show_or_hide_sidebar,
 			this.setup_filter_area,
 			this.setup_sort_selector,
 			this.setup_result_area,
@@ -344,6 +358,11 @@ frappe.views.BaseList = class BaseList {
 		};
 	}
 
+	before_refresh() {
+		// modify args here just before making the request
+		// see list_view.js
+	}
+
 	refresh() {
 		this.freeze(true);
 		// fetch data from server
@@ -353,6 +372,7 @@ frappe.views.BaseList = class BaseList {
 			this.toggle_result_area();
 			this.before_render();
 			this.render();
+			this.after_render();
 			this.freeze(false);
 			if (this.settings.refresh) {
 				this.settings.refresh(this);
@@ -384,8 +404,16 @@ frappe.views.BaseList = class BaseList {
 
 	}
 
+	after_render() {
+
+	}
+
 	render() {
 		// for child classes
+	}
+
+	on_filter_change() {
+		// fired when filters are added or removed
 	}
 
 	toggle_result_area() {
@@ -476,6 +504,7 @@ class FilterArea {
 		if (this.trigger_refresh) {
 			this.list_view.start = 0;
 			this.list_view.refresh();
+			this.list_view.on_filter_change();
 		}
 	}
 
@@ -533,12 +562,12 @@ class FilterArea {
 		const fields_dict = this.list_view.page.fields_dict;
 
 		if (fieldname in fields_dict) {
-			fields_dict[fieldname].set_value('');
-			return;
+			return fields_dict[fieldname].set_value('');
 		}
 
 		let filter = this.filter_list.get_filter(fieldname);
 		if (filter) filter.remove();
+		return Promise.resolve();
 	}
 
 	clear(refresh = true) {
@@ -580,7 +609,6 @@ class FilterArea {
 		}
 
 		const doctype_fields = this.list_view.meta.fields;
-
 		fields = fields.concat(doctype_fields.filter(
 			df => df.in_standard_filter &&
 				frappe.model.is_value_type(df.fieldtype)
@@ -599,24 +627,21 @@ class FilterArea {
 					options = options.join("\n");
 				}
 			}
+			let default_value = (fieldtype === 'Link') ? frappe.defaults.get_user_default(options) : null;
+			if (['__default', '__global'].includes(default_value)) {
+				default_value = null;
+			}
 			return {
 				fieldtype: fieldtype,
 				label: __(df.label),
 				options: options,
 				fieldname: df.fieldname,
 				condition: condition,
-				onchange: () => this.refresh_list_view()
+				default: default_value,
+				onchange: () => this.refresh_list_view(),
+				ignore_link_validation: fieldtype === 'Dynamic Link'
 			};
 		}));
-
-		if (fields.length > 3) {
-			fields = fields.map((df, i) => {
-				if (i >= 3) {
-					df.input_class = 'hidden-sm hidden-xs';
-				}
-				return df;
-			});
-		}
 
 		fields.map(df => this.list_view.page.add_field(df));
 
@@ -666,6 +691,12 @@ class FilterArea {
 			default_filters: [],
 			on_change: () => this.refresh_list_view()
 		});
+	}
+
+	is_being_edited() {
+		// returns true if user is currently editing filters
+		return this.filter_list &&
+			this.filter_list.wrapper.find('.filter-box:visible').length > 0;
 	}
 }
 

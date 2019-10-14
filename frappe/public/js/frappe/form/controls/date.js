@@ -9,7 +9,11 @@ frappe.ui.form.ControlDate = frappe.ui.form.ControlData.extend({
 	},
 	set_formatted_input: function(value) {
 		this._super(value);
-		if(!value || !this.datepicker) return;
+		if (!this.datepicker) return;
+		if(!value) {
+			this.datepicker.clear();
+			return;
+		}
 
 		let should_refresh = this.last_value && this.last_value !== value;
 
@@ -35,7 +39,8 @@ frappe.ui.form.ControlDate = frappe.ui.form.ControlData.extend({
 		// webformTODO:
 		let sysdefaults = frappe.boot.sysdefaults;
 
-		let lang = frappe.boot.user.language || 'en';
+		let lang = 'en';
+		frappe.boot.user && (lang = frappe.boot.user.language);
 		if(!$.fn.datepicker.language[lang]) {
 			lang = 'en';
 		}

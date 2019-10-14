@@ -11,7 +11,6 @@ from frappe import _
 from six.moves.urllib.parse import urlparse, urlencode
 import base64
 
-
 def handle():
 	"""
 	Handler for `/api` methods
@@ -114,7 +113,10 @@ def handle():
 							doctype, **frappe.local.form_dict)})
 
 				if frappe.local.request.method=="POST":
-					data = json.loads(frappe.local.form_dict.data)
+					if frappe.local.form_dict.data is None:
+						data = json.loads(frappe.local.request.get_data())
+					else:
+						data = json.loads(frappe.local.form_dict.data)
 					data.update({
 						"doctype": doctype
 					})

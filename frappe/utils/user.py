@@ -157,32 +157,16 @@ class UserPermissions:
 				self.can_read.remove(dt)
 
 		if "System Manager" in self.get_roles():
-			self.can_import = filter(lambda d: d in self.can_create,
-				frappe.db.sql_list("""select name from `tabDocType` where allow_import = 1"""))
+			docs = [x["name"] for x in frappe.get_all("DocType", "name")]
+			for docname in docs:
+				if frappe.get_meta(docname, cached=False).allow_import == 1:
+					self.can_import.append(docname)
+			frappe.cache().hset("can_import", frappe.session.user, self.can_import)
 
 	def get_defaults(self):
 		import frappe.defaults
 		self.defaults = frappe.defaults.get_defaults(self.name)
 		return self.defaults
-
-	# update recent documents
-	def update_recent(self, dt, dn):
-		rdl = frappe.cache().hget("user_recent", self.name) or []
-		new_rd = [dt, dn]
-
-		# clear if exists
-		for i in range(len(rdl)):
-			rd = rdl[i]
-			if rd==new_rd:
-				del rdl[i]
-				break
-
-		if len(rdl) > 19:
-			rdl = rdl[:19]
-
-		rdl = [new_rd] + rdl
-
-		frappe.cache().hset("user_recent", self.name, rdl)
 
 	def _get(self, key):
 		if not self.can_read:
@@ -197,15 +181,14 @@ class UserPermissions:
 
 	def load_user(self):
 		d = frappe.db.sql("""select email, first_name, last_name, creation,
-			email_signature, user_type, language, background_image, background_style,
-			mute_sounds, send_me_a_copy from tabUser where name = %s""", (self.name,), as_dict=1)[0]
+			email_signature, user_type, language,
+			mute_sounds, send_me_a_copy, document_follow_notify
+			from tabUser where name = %s""", (self.name,), as_dict=1)[0]
 
 		if not self.can_read:
 			self.build_permissions()
 
 		d.name = self.name
-		d.recent = json.dumps(frappe.cache().hget("user_recent", self.name) or [])
-
 		d.roles = self.get_roles()
 		d.defaults = self.get_defaults()
 
@@ -229,7 +212,7 @@ def get_fullname_and_avatar(user):
 	first_name, last_name, avatar, name = frappe.db.get_value("User",
 		user, ["first_name", "last_name", "user_image", "name"])
 	return _dict({
-		"fullname": " ".join(filter(None, [first_name, last_name])),
+		"fullname": " ".join(list(filter(None, [first_name, last_name]))),
 		"avatar": avatar,
 		"name": name
 	})
@@ -263,7 +246,7 @@ def get_system_managers(only_name=False):
 def add_role(user, role):
 	frappe.get_doc("User", user).add_roles(role)
 
-def add_system_manager(email, first_name=None, last_name=None, send_welcome_email=False):
+def add_system_manager(email, first_name=None, last_name=None, send_welcome_email=False, password=None):
 	# add user
 	user = frappe.new_doc("User")
 	user.update({
@@ -287,6 +270,10 @@ def add_system_manager(email, first_name=None, last_name=None, send_welcome_emai
 	)
 	roles = [role.name for role in roles]
 	user.add_roles(*roles)
+
+	if password:
+		from frappe.utils.password import update_password
+		update_password(user=user.name, pwd=password)
 
 def get_enabled_system_users():
 	# add more fields if required
@@ -322,36 +309,6 @@ def set_last_active_to_now(user):
 	from frappe.utils import now_datetime
 	frappe.db.set_value("User", user, "last_active", now_datetime())
 
-def disable_users(limits=None):
-	if not limits:
-		return
-
-	if limits.get('users'):
-		system_manager = get_system_managers(only_name=True)[-1]
-
-		#exclude system manager from active user list
-		active_users =  frappe.db.sql_list("""select name from tabUser
-			where name not in ('Administrator', 'Guest', %s) and user_type = 'System User' and enabled=1
-			order by creation desc""", system_manager)
-
-		user_limit = cint(limits.get('users')) - 1
-
-		if len(active_users) > user_limit:
-
-			# if allowed user limit 1 then deactivate all additional users
-			# else extract additional user from active user list and deactivate them
-			if cint(limits.get('users')) != 1:
-				active_users = active_users[:-1 * user_limit]
-
-			for user in active_users:
-				frappe.db.set_value("User", user, 'enabled', 0)
-
-		from frappe.core.doctype.user.user import get_total_users
-
-		if get_total_users() > cint(limits.get('users')):
-			reset_simultaneous_sessions(cint(limits.get('users')))
-
-	frappe.db.commit()
 
 def reset_simultaneous_sessions(user_limit):
 	for user in frappe.db.sql("""select name, simultaneous_sessions from tabUser
@@ -374,3 +331,11 @@ def get_link_to_reset_password(user):
 	return {
 		'link': link
 	}
+
+def get_users_with_role(role):
+	return [p[0] for p in frappe.db.sql("""SELECT DISTINCT `tabUser`.`name`
+		FROM `tabHas Role`, `tabUser`
+		WHERE `tabHas Role`.`role`=%s
+		AND `tabUser`.`name`!='Administrator'
+		AND `tabHas Role`.`parent`=`tabUser`.`name`
+		AND `tabUser`.`enabled`=1""", role)]

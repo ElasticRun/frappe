@@ -3,13 +3,13 @@
 from __future__ import unicode_literals
 
 import frappe
-from frappe.utils import encode, cstr, cint, flt, comma_or
 
 import openpyxl
+import xlrd
 import re
 from openpyxl.styles import Font
 from openpyxl import load_workbook
-from six import StringIO, BytesIO, string_types
+from six import BytesIO, string_types
 
 ILLEGAL_CHARACTERS_RE = re.compile(r'[\000-\010]|[\013-\014]|[\016-\037]')
 # return xlsx file object
@@ -53,7 +53,7 @@ def handle_html(data):
 	if '>' not in data:
 		return data
 
-	from html2text import unescape, HTML2Text
+	from html2text import HTML2Text
 
 	h = HTML2Text()
 	h.unicode_snob = True
@@ -62,15 +62,22 @@ def handle_html(data):
 	obj = HTML2Text()
 	obj.ignore_links = True
 	obj.body_width = 0
-	value = obj.handle(h)
+
+	try:
+		value = obj.handle(h)
+	except Exception:
+		# unable to parse html, send it raw
+		return data
+
 	value = ", ".join(value.split('  \n'))
 	value = " ".join(value.split('\n'))
 	value = ", ".join(value.split('# '))
+
 	return value
 
-def read_xlsx_file_from_attached_file(file_id=None, fcontent=None, filepath=None):
-	if file_id:
-		_file = frappe.get_doc("File", {"file_name": file_id})
+def read_xlsx_file_from_attached_file(file_url=None, fcontent=None, filepath=None):
+	if file_url:
+		_file = frappe.get_doc("File", {"file_url": file_url})
 		filename = _file.get_full_path()
 	elif fcontent:
 		from io import BytesIO
@@ -81,7 +88,7 @@ def read_xlsx_file_from_attached_file(file_id=None, fcontent=None, filepath=None
 		return
 
 	rows = []
-	wb1 = load_workbook(filename=filename, read_only=True)
+	wb1 = load_workbook(filename=filename, read_only=True, data_only=True)
 	ws1 = wb1.active
 	for row in ws1.iter_rows():
 		tmp_list = []
@@ -89,3 +96,19 @@ def read_xlsx_file_from_attached_file(file_id=None, fcontent=None, filepath=None
 			tmp_list.append(cell.value)
 		rows.append(tmp_list)
 	return rows
+
+def read_xls_file_from_attached_file(content):
+	book = xlrd.open_workbook(file_contents=content)
+	sheets = book.sheets()
+	sheet = sheets[0]
+	rows = []
+	for i in range(sheet.nrows):
+		rows.append(sheet.row_values(i))
+	return rows
+
+def build_xlsx_response(data, filename):
+	xlsx_file = make_xlsx(data, filename)
+	# write out response as a xlsx type
+	frappe.response['filename'] = filename + '.xlsx'
+	frappe.response['filecontent'] = xlsx_file.getvalue()
+	frappe.response['type'] = 'binary'

@@ -1,3 +1,5 @@
+from __future__ import unicode_literals
+
 # imports - standard imports
 import json
 
@@ -67,15 +69,12 @@ class ChatRoom(Document):
 		if self.type == "Group" and not self.room_name:
 			frappe.throw(_('Group name cannot be empty.'))
 
-	def before_save(self):
-		if not self.is_new():
-			self.get_doc_before_save()
-
 	def on_update(self):
 		if not self.is_new():
 			before = self.get_doc_before_save()
-			after  = self
+			if not before: return
 
+			after  = self
 			diff   = dictify(get_diff(before, after))
 			if diff:
 				update = { }
@@ -195,7 +194,10 @@ def create(kind, owner, users = None, name = None):
 
 		for user in dsettings.chat_operators:
 			if user.user not in users:
-				room.append('users', user)
+				# appending user to room.users will remove the user from chat_operators
+				# this is undesirable, create a new Chat Room User instead
+				chat_room_user = {"doctype": "Chat Room User", "user": user.user}
+				room.append('users', chat_room_user)
 
 	room.save(ignore_permissions = True)
 

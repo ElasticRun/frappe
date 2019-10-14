@@ -1,13 +1,13 @@
 import Quill from 'quill';
-import { ImageDrop } from 'quill-image-drop-module';
-
-
-Quill.register('modules/imageDrop', ImageDrop);
 
 // replace <p> tag with <div>
 const Block = Quill.import('blots/block');
 Block.tagName = 'DIV';
 Quill.register(Block, true);
+
+const CodeBlockContainer = Quill.import('formats/code-block-container');
+CodeBlockContainer.tagName = 'PRE';
+Quill.register(CodeBlockContainer, true);
 
 // table
 const Table = Quill.import('formats/table-container');
@@ -20,21 +20,46 @@ Table.create = (value) => {
 }
 Quill.register(Table, true);
 
+// link without href
+var Link = Quill.import('formats/link');
+
+class MyLink extends Link {
+	static create(value) {
+		let node = super.create(value);
+		value = this.sanitize(value);
+		node.setAttribute('href', value);
+		if(value.startsWith('/') || value.indexOf(window.location.host)) {
+			// no href if internal link
+			node.removeAttribute('target');
+		}
+		return node;
+	}
+}
+
+Quill.register(MyLink);
+
+// image uploader
+const Uploader = Quill.import('modules/uploader');
+Uploader.DEFAULTS.mimetypes.push('image/gif');
+
 // inline style
 const BackgroundStyle = Quill.import('attributors/style/background');
 const ColorStyle = Quill.import('attributors/style/color');
-const SizeStyle = Quill.import('attributors/style/size');
 const FontStyle = Quill.import('attributors/style/font');
 const AlignStyle = Quill.import('attributors/style/align');
 const DirectionStyle = Quill.import('attributors/style/direction');
 Quill.register(BackgroundStyle, true);
 Quill.register(ColorStyle, true);
-Quill.register(SizeStyle, true);
 Quill.register(FontStyle, true);
 Quill.register(AlignStyle, true);
 Quill.register(DirectionStyle, true);
 
 frappe.ui.form.ControlTextEditor = frappe.ui.form.ControlCode.extend({
+	make_wrapper() {
+		this._super();
+		this.$wrapper.find(".like-disabled-input").addClass('text-editor-print');
+	},
+
 	make_input() {
 		this.has_input = true;
 		this.make_quill_editor();
@@ -64,30 +89,6 @@ frappe.ui.form.ControlTextEditor = frappe.ui.form.ControlCode.extend({
 
 		$(this.quill.root).on('drop', (e) => {
 			e.stopPropagation();
-		});
-
-		// paste images
-		$(this.quill.root).on('paste', (e) => {
-			const clipboardData = e.originalEvent.clipboardData;
-			const files = clipboardData.files;
-			if (files.length > 0) {
-
-				Array.from(files).forEach(file => {
-					if (!file.type.match(/^image\/(gif|jpe?g|a?png|svg|webp|bmp|vnd\.microsoft\.icon)/i)) {
-						// file is not an image
-						// Note that some file formats such as psd start with image/* but are not readable
-						return;
-					}
-
-					frappe.dom.file_to_base64(file)
-						.then(data_url => {
-							setTimeout(() => {
-								const index = (this.quill.getSelection() || {}).index || this.quill.getLength();
-								this.quill.insertEmbed(index, 'image', data_url, 'user');
-							});
-						})
-				});
-			}
 		});
 
 		// table commands
@@ -133,7 +134,6 @@ frappe.ui.form.ControlTextEditor = frappe.ui.form.ControlCode.extend({
 		return {
 			modules: {
 				toolbar: this.get_toolbar_options(),
-				imageDrop: true,
 				table: true
 			},
 			theme: 'snow'
@@ -144,6 +144,7 @@ frappe.ui.form.ControlTextEditor = frappe.ui.form.ControlCode.extend({
 		return [
 			[{ 'header': [1, 2, 3, false] }],
 			['bold', 'italic', 'underline'],
+			[{ 'color': [] }, { 'background': [] }],
 			['blockquote', 'code-block'],
 			['link', 'image'],
 			[{ 'list': 'ordered' }, { 'list': 'bullet' }],
@@ -179,11 +180,99 @@ frappe.ui.form.ControlTextEditor = frappe.ui.form.ControlCode.extend({
 			return;
 		}
 
-		this.quill.setText('');
-		this.quill.clipboard.dangerouslyPasteHTML(0, value);
+		// set html without triggering a focus
+		const delta = this.quill.clipboard.convert({ html: value, text: '' });
+		this.quill.setContents(delta);
 	},
 
 	get_input_value() {
-		return this.quill ? this.quill.root.innerHTML : '';
+		let value = this.quill ? this.quill.root.innerHTML : '';
+		// quill keeps ol as a common container for both type of lists
+		// and uses css for appearances, this is not semantic
+		// so we convert ol to ul if it is unordered
+		const $value = $(`<div>${value}</div>`);
+		$value.find('ol li[data-list=bullet]:first-child').each((i, li) => {
+			let $li = $(li);
+			let $parent = $li.parent();
+			let $children = $parent.children();
+			let $ul = $('<ul>').append($children);
+			$parent.replaceWith($ul);
+		});
+		value = this.convertLists($value.html());
+		return value;
+	},
+
+	// hack
+	// https://github.com/quilljs/quill/issues/979
+	convertLists(richtext) {
+		const tempEl = window.document.createElement('div');
+		tempEl.setAttribute('style', 'display: none;');
+		tempEl.innerHTML = richtext;
+		const startLi = '::startli::';
+		const endLi = '::endli::';
+
+		['ul','ol'].forEach((type) => {
+			const startTag = `::start${type}::`;
+			const endTag = `::end${type}::`;
+
+			// Grab each list, and work on it in turn
+			Array.from(tempEl.querySelectorAll(type)).forEach((outerListEl) => {
+				const listChildren = Array.from(outerListEl.children).filter((el) => el.tagName === 'LI');
+
+				let lastLiLevel = 0;
+				let currentLiLevel = 0;
+				let difference = 0;
+
+				// Now work through each li in this list
+				for (let i = 0; i < listChildren.length; i++) {
+					const currentLi = listChildren[i];
+					lastLiLevel = currentLiLevel;
+					currentLiLevel = this.getListLevel(currentLi);
+					difference = currentLiLevel - lastLiLevel;
+
+					// we only need to add tags if the level is changing
+					if (difference > 0) {
+						currentLi.before((startLi + startTag).repeat(difference));
+					} else if (difference < 0) {
+						currentLi.before((endTag + endLi).repeat(-difference));
+					}
+
+					if (i === listChildren.length - 1) {
+						// last li, account for the fact that it might not be at level 0
+						currentLi.after((endTag + endLi).repeat(currentLiLevel));
+					}
+				}
+			});
+		});
+
+		//  Get the content in the element and replace the temporary tags with new ones
+		let newContent = tempEl.innerHTML;
+
+		newContent = newContent.replace(/::startul::/g, '<ul>');
+		newContent = newContent.replace(/::endul::/g, '</ul>');
+		newContent = newContent.replace(/::startol::/g, '<ol>');
+		newContent = newContent.replace(/::endol::/g, '</ol>');
+		newContent = newContent.replace(/::startli::/g, '<li>');
+		newContent = newContent.replace(/::endli::/g, '</li>');
+
+		// remove quill classes
+		newContent = newContent.replace(/data-list=.bullet./g, '');
+		newContent = newContent.replace(/class=.ql-indent-../g, '');
+
+		// ul/ol should not be inside another li
+		newContent = newContent.replace(/<\/li><li><ul>/g, '<ul>');
+		newContent = newContent.replace(/<\/li><li><ol>/g, '<ol>');
+		tempEl.remove();
+
+		return newContent;
+	},
+
+	getListLevel(el) {
+		const className = el.className || '0';
+		return +className.replace(/[^\d]/g, '');
+	},
+
+	set_focus() {
+		this.quill.focus();
 	}
 });

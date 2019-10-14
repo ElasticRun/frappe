@@ -14,7 +14,7 @@ from six import iteritems, text_type, string_types, PY2
 
 import frappe, os, re, io, codecs, json
 from frappe.model.utils import render_include, InvalidIncludePath
-from frappe.utils import strip
+from frappe.utils import strip, strip_html_tags, is_html
 from jinja2 import TemplateError
 import itertools, operator
 
@@ -116,14 +116,16 @@ def get_dict(fortype, name=None):
 			messages += frappe.db.sql("select 'DocType:', name from tabDocType")
 			messages += frappe.db.sql("select 'Role:', name from tabRole")
 			messages += frappe.db.sql("select 'Module:', name from `tabModule Def`")
-			messages += frappe.db.sql("select 'Module:', label from `tabDesktop Icon` where standard=1 or owner=%s",
-				frappe.session.user)
+
 
 		message_dict = make_dict_from_messages(messages)
 		message_dict.update(get_dict_from_hooks(fortype, name))
 
 		# remove untranslated
 		message_dict = {k:v for k, v in iteritems(message_dict) if k!=v}
+
+		if fortype=="boot":
+			message_dict.update(get_user_translations(frappe.local.lang))
 
 		translation_assets[asset_key] = message_dict
 
@@ -483,7 +485,7 @@ def get_all_messages_from_js_files(app_name=None):
 					continue
 
 				for fname in files:
-					if fname.endswith(".js") or fname.endswith(".html"):
+					if fname.endswith(".js") or fname.endswith(".html") or fname.endswith('.vue'):
 						messages.extend(get_messages_from_file(os.path.join(basepath, fname)))
 
 	return messages
@@ -496,8 +498,9 @@ def get_messages_from_file(path):
 	apps_path = get_bench_dir()
 	if os.path.exists(path):
 		with open(path, 'r') as sourcefile:
-			return [(os.path.relpath(" +".join([path, str(pos)]), apps_path),
-					message) for pos, message in  extract_messages_from_code(sourcefile.read(), path.endswith(".py"))]
+			data = [(os.path.relpath(path, apps_path),
+					message) for message in  extract_messages_from_code(sourcefile.read(), path.endswith(".py"))]
+			return data
 	else:
 		# print "Translate: {0} missing".format(os.path.abspath(path))
 		return []
@@ -509,7 +512,7 @@ def extract_messages_from_code(code, is_py=False):
 	:param is_py: include messages in triple quotes e.g. `_('''message''')`"""
 	try:
 		code = frappe.as_unicode(render_include(code))
-	except (TemplateError, ImportError, InvalidIncludePath):
+	except (TemplateError, ImportError, InvalidIncludePath, IOError):
 		# Exception will occur when it encounters John Resig's microtemplating code
 		pass
 
@@ -537,7 +540,7 @@ def pos_to_line_no(messages, code):
 		while newline_i < len(newlines) and pos > newlines[newline_i]:
 			line+=1
 			newline_i+= 1
-		ret.append((line, message))
+		ret.append((message))
 	return ret
 
 def read_csv_file(path):
@@ -741,3 +744,15 @@ def update_translations_for_source(source=None, translation_dict=None):
 		doc.save()
 
 	return translation_records
+
+@frappe.whitelist()
+def get_translations(source_name):
+	if is_html(source_name):
+		source_name = strip_html_tags(source_name)
+
+	return frappe.db.get_list('Translation',
+		fields = ['name', 'language', 'target_name as translation'],
+		filters = {
+			'source_name': source_name
+		}
+	)

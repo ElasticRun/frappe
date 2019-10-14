@@ -21,6 +21,7 @@ psycopg2.extensions.register_type(DEC2FLOAT)
 
 class PostgresDatabase(Database):
 	ProgrammingError = psycopg2.ProgrammingError
+	TableMissingError = psycopg2.ProgrammingError
 	OperationalError = psycopg2.OperationalError
 	InternalError = psycopg2.InternalError
 	SQLError = psycopg2.ProgrammingError
@@ -29,10 +30,11 @@ class PostgresDatabase(Database):
 	REGEX_CHARACTER = '~'
 
 	def setup_type_map(self):
+		self.db_type = 'postgres'
 		self.type_map = {
 			'Currency':		('decimal', '18,6'),
 			'Int':			('bigint', None),
-			'Long Int':		('bigint', None), # convert int to bigint if length is more than 11
+			'Long Int':		('bigint', None),
 			'Float':		('decimal', '18,6'),
 			'Percent':		('decimal', '18,6'),
 			'Check':		('smallint', None),
@@ -40,6 +42,8 @@ class PostgresDatabase(Database):
 			'Long Text':	('text', ''),
 			'Code':			('text', ''),
 			'Text Editor':	('text', ''),
+			'Markdown Editor':	('text', ''),
+			'HTML Editor':	('text', ''),
 			'Date':			('date', ''),
 			'Datetime':		('timestamp', None),
 			'Time':			('time', '6'),
@@ -49,6 +53,7 @@ class PostgresDatabase(Database):
 			'Dynamic Link':	('varchar', self.VARCHAR_LEN),
 			'Password':		('varchar', self.VARCHAR_LEN),
 			'Select':		('varchar', self.VARCHAR_LEN),
+			'Rating':		('smallint', None),
 			'Read Only':	('varchar', self.VARCHAR_LEN),
 			'Attach':		('text', ''),
 			'Attach Image':	('text', ''),
@@ -60,10 +65,10 @@ class PostgresDatabase(Database):
 
 	def get_connection(self):
 		# warnings.filterwarnings('ignore', category=psycopg2.Warning)
-		conn = psycopg2.connect('host={} dbname={}'.format(self.host, self.user))
+		conn = psycopg2.connect("host='{}' dbname='{}' user='{}' password='{}' port={}".format(
+			self.host, self.user, self.user, self.password, self.port
+		))
 		conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT) # TODO: Remove this
-		# conn = psycopg2.connect('host={} dbname={} user={} password={}'.format(self.host,
-		# 	self.user, self.user, self.password))
 
 		return conn
 
@@ -106,13 +111,10 @@ class PostgresDatabase(Database):
 
 	def format_date(self, date):
 		if not date:
-			return '0001-01-01::DATE'
+			return '0001-01-01'
 
-		if isinstance(date, frappe.string_types):
-			if ':' not in date:
-				date = date + '::DATE'
-		else:
-			date = date.strftime('%Y-%m-%d') + '::DATE'
+		if not isinstance(date, frappe.string_types):
+			date = date.strftime('%Y-%m-%d')
 
 		return date
 
@@ -166,6 +168,10 @@ class PostgresDatabase(Database):
 	@staticmethod
 	def is_duplicate_fieldname(e):
 		return e.pgcode == '42701'
+
+	@staticmethod
+	def is_data_too_long(e):
+		return e.pgcode == '22001'
 
 	def create_auth_table(self):
 		self.sql_ddl("""create table if not exists "__Auth" (

@@ -1,8 +1,10 @@
 // Copyright (c) 2016, Frappe Technologies and contributors
 // For license information, please see license.txt
 
-cur_frm.email_field = "email_id";
 frappe.ui.form.on("Contact", {
+	onload(frm) {
+		frm.email_field = "email_id";
+	},
 	refresh: function(frm) {
 		if(frm.doc.__islocal) {
 			const last_doc = frappe.contacts.get_last_doc(frm);
@@ -39,6 +41,24 @@ frappe.ui.form.on("Contact", {
 			}
 		});
 		frm.refresh_field("links");
+
+		if (frm.doc.links.length > 0) {
+			frappe.call({
+				method: "frappe.contacts.doctype.contact.contact.address_query",
+				args: {links: frm.doc.links},
+				callback: function(r) {
+					if (r && r.message) {
+						frm.set_query("address", function () {
+							return {
+								filters: {
+									name: ["in", r.message],
+								}
+							}
+						});
+					}
+				}
+			});
+		}
 	},
 	validate: function(frm) {
 		// clear linked customer / supplier / sales partner on saving...
@@ -59,6 +79,15 @@ frappe.ui.form.on("Contact", {
 				}
 			}
 		]);
+	},
+	sync_with_google_contacts: function(frm) {
+		if (frm.doc.sync_with_google_contacts) {
+			frappe.db.get_value("Google Contacts", {"email_id": frappe.session.user}, "name", (r) => {
+				if (r && r.name) {
+					frm.set_value("google_contacts", r.name);
+				}
+			})
+		}
 	}
 });
 

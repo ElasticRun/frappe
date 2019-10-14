@@ -8,6 +8,7 @@ from __future__ import unicode_literals
 import frappe, json
 from frappe.database.schema import add_column
 from frappe import _
+from frappe.desk.form.document_follow import follow_document
 from frappe.utils import get_link_to_form
 
 @frappe.whitelist()
@@ -33,10 +34,6 @@ def _toggle_like(doctype, name, add, user=None):
 	try:
 		liked_by = frappe.db.get_value(doctype, name, "_liked_by")
 
-		# CHANGED: Allow someone to like their own documents as it also works as a bookmark
-		# if owner==frappe.session.user and add=="Yes":
-		# 	frappe.throw(_("You cannot like something that you created"))
-
 		if liked_by:
 			liked_by = json.loads(liked_by)
 		else:
@@ -46,7 +43,7 @@ def _toggle_like(doctype, name, add, user=None):
 			if user not in liked_by:
 				liked_by.append(user)
 				add_comment(doctype, name)
-
+				follow_document(doctype, name, user)
 		else:
 			if user in liked_by:
 				liked_by.remove(user)
@@ -64,13 +61,12 @@ def _toggle_like(doctype, name, add, user=None):
 def remove_like(doctype, name):
 	"""Remove previous Like"""
 	# remove Comment
-	frappe.delete_doc("Communication", [c.name for c in frappe.get_all("Communication",
+	frappe.delete_doc("Comment", [c.name for c in frappe.get_all("Comment",
 		filters={
-			"communication_type": "Comment",
+			"comment_type": "Like",
 			"reference_doctype": doctype,
 			"reference_name": name,
 			"owner": frappe.session.user,
-			"comment_type": "Like"
 		}
 	)], ignore_permissions=True)
 

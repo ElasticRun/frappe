@@ -6,16 +6,18 @@ frappe.views.GanttView = class GanttView extends frappe.views.ListView {
 	}
 
 	setup_defaults() {
-		super.setup_defaults();
-		this.page_title = this.page_title + ' ' + __('Gantt');
-		this.calendar_settings = frappe.views.calendar[this.doctype] || {};
-		if(this.calendar_settings.order_by) {
-			this.sort_by = this.calendar_settings.order_by;
-			this.sort_order = 'asc';
-		} else {
-			this.sort_by = this.view_user_settings.sort_by || this.calendar_settings.field_map.start;
-			this.sort_order = this.view_user_settings.sort_order || 'asc';
-		}
+		return super.setup_defaults()
+			.then(() => {
+				this.page_title = this.page_title + ' ' + __('Gantt');
+				this.calendar_settings = frappe.views.calendar[this.doctype] || {};
+				if(this.calendar_settings.order_by) {
+					this.sort_by = this.calendar_settings.order_by;
+					this.sort_order = 'asc';
+				} else {
+					this.sort_by = this.view_user_settings.sort_by || this.calendar_settings.field_map.start;
+					this.sort_order = this.view_user_settings.sort_order || 'asc';
+				}
+			})
 	}
 
 	setup_view() {
@@ -125,7 +127,7 @@ frappe.views.GanttView = class GanttView extends frappe.views.ListView {
 
 				var html =
 					`<h5>${task.name}</h5>
-					<p>${task._start.format('MMM D')} - ${task._end.format('MMM D')}</p>`;
+					<p>${moment(task._start).format('MMM D')} - ${moment(task._end).format('MMM D')}</p>`;
 
 				// custom html in doctype settings
 				var custom = me.settings.gantt_custom_popup_html;
@@ -207,3 +209,4 @@ frappe.views.GanttView = class GanttView extends frappe.views.ListView {
 		];
 	}
 };
+

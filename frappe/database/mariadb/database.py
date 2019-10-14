@@ -17,6 +17,7 @@ from frappe.database.mariadb.schema import MariaDBTable
 
 class MariaDBDatabase(Database):
 	ProgrammingError = pymysql.err.ProgrammingError
+	TableMissingError = pymysql.err.ProgrammingError
 	OperationalError = pymysql.err.OperationalError
 	InternalError = pymysql.err.InternalError
 	SQLError = pymysql.err.ProgrammingError
@@ -24,10 +25,11 @@ class MariaDBDatabase(Database):
 	REGEX_CHARACTER = 'regexp'
 
 	def setup_type_map(self):
+		self.db_type = 'mariadb'
 		self.type_map = {
 			'Currency':		('decimal', '18,6'),
 			'Int':			('int', '11'),
-			'Long Int':		('bigint', '20'), # convert int to bigint if length is more than 11
+			'Long Int':		('bigint', '20'),
 			'Float':		('decimal', '18,6'),
 			'Percent':		('decimal', '18,6'),
 			'Check':		('int', '1'),
@@ -35,6 +37,8 @@ class MariaDBDatabase(Database):
 			'Long Text':	('longtext', ''),
 			'Code':			('longtext', ''),
 			'Text Editor':	('longtext', ''),
+			'Markdown Editor':	('longtext', ''),
+			'HTML Editor':	('longtext', ''),
 			'Date':			('date', ''),
 			'Datetime':		('datetime', '6'),
 			'Time':			('time', '6'),
@@ -44,6 +48,7 @@ class MariaDBDatabase(Database):
 			'Dynamic Link':	('varchar', self.VARCHAR_LEN),
 			'Password':		('varchar', self.VARCHAR_LEN),
 			'Select':		('varchar', self.VARCHAR_LEN),
+			'Rating':		('int', '1'),
 			'Read Only':	('varchar', self.VARCHAR_LEN),
 			'Attach':		('text', ''),
 			'Attach Image':	('text', ''),
@@ -77,11 +82,11 @@ class MariaDBDatabase(Database):
 
 		if usessl:
 			conn = pymysql.connect(self.host, self.user or '', self.password or '',
-				charset='utf8mb4', use_unicode = True, ssl=ssl_params,
+				port=self.port, charset='utf8mb4', use_unicode = True, ssl=ssl_params,
 				conv = conversions, local_infile = frappe.conf.local_infile)
 		else:
 			conn = pymysql.connect(self.host, self.user or '', self.password or '',
-				charset='utf8mb4', use_unicode = True, conv = conversions,
+				port=self.port, charset='utf8mb4', use_unicode = True, conv = conversions,
 				local_infile = frappe.conf.local_infile)
 
 		# MYSQL_OPTION_MULTI_STATEMENTS_OFF = 1
@@ -159,6 +164,14 @@ class MariaDBDatabase(Database):
 	@staticmethod
 	def cant_drop_field_or_key(e):
 		return e.args[0] == ER.CANT_DROP_FIELD_OR_KEY
+
+	@staticmethod
+	def is_syntax_error(e):
+		return e.args[0] == ER.PARSE_ERROR
+
+	@staticmethod
+	def is_data_too_long(e):
+		return e.args[0] == ER.DATA_TOO_LONG
 
 	def is_primary_key_violation(self, e):
 		return self.is_duplicate_entry(e) and 'PRIMARY' in cstr(e.args[1])

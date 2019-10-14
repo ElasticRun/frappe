@@ -1,12 +1,13 @@
+from __future__ import unicode_literals
 import frappe
-import json, urllib2, os
-from frappe.modules import scrub, get_module_path, load_doctype_module, utils
+import json, os
+from frappe.modules import scrub, get_module_path, utils
 from frappe.custom.doctype.customize_form.customize_form import doctype_properties, docfield_properties
 from frappe.custom.doctype.property_setter.property_setter import make_property_setter
 from frappe.custom.doctype.custom_field.custom_field import create_custom_field
-from frappe.modules.import_file import get_file_path, read_doc_from_file
 from frappe.core.page.permission_manager.permission_manager import get_standard_permissions
 from frappe.permissions import setup_custom_perms
+from six.moves.urllib.request import urlopen
 
 branch = 'develop'
 
@@ -28,7 +29,7 @@ def reset_doc(doctype):
 	try:
 		git_link = '/'.join(['https://raw.githubusercontent.com/frappe',\
 			app, branch, doc_path.split('apps/'+app)[1]])
-		original_file = urllib2.urlopen(git_link).read()
+		original_file = urlopen(git_link).read()
 	except:
 		print('Did not find {0} in {1}'.format(doctype, app))
 		return
@@ -88,7 +89,7 @@ def make_custom_fields(doctype, local_doc, original_doc):
 
 	custom_docfield_properties, prev = get_custom_docfield_properties(), ""
 	for field, field_dict in local_fields:
-		df, doc = {}, {}
+		df = {}
 		if field not in original_fields:
 			for prop in field_dict:
 				if prop in custom_docfield_properties:

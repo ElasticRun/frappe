@@ -7,10 +7,13 @@ import frappe
 
 from frappe.utils import global_search
 from frappe.test_runner import make_test_objects
+from frappe.desk.page.setup_wizard.install_fixtures import update_global_search_doctypes
+
 import frappe.utils
 
 class TestGlobalSearch(unittest.TestCase):
 	def setUp(self):
+		update_global_search_doctypes()
 		global_search.setup_global_search_table()
 		self.assertTrue('__global_search' in frappe.db.get_tables())
 		doctype = "Event"
@@ -39,10 +42,12 @@ class TestGlobalSearch(unittest.TestCase):
 			frappe.get_doc(dict(
 				doctype='Event',
 				subject=text,
-				repeat_on='Every Month',
+				repeat_on='Monthly',
 				starts_on=frappe.utils.now_datetime())).insert()
 
+		global_search.sync_global_search()
 		frappe.db.commit()
+
 
 	def test_search(self):
 		self.insert_test_events()
@@ -61,21 +66,21 @@ class TestGlobalSearch(unittest.TestCase):
 		event.subject = test_subject
 		event.save()
 		frappe.db.commit()
-
+		global_search.sync_global_search()
 		results = global_search.search('testing global search')
 
 		self.assertTrue('testing global search' in results[0].content)
 
 	def test_update_fields(self):
 		self.insert_test_events()
-		results = global_search.search('Every Month')
+		results = global_search.search('Monthly')
 		self.assertEqual(len(results), 0)
 		doctype = "Event"
 		from frappe.custom.doctype.property_setter.property_setter import make_property_setter
 		make_property_setter(doctype, "repeat_on", "in_global_search", 1, "Int")
 		global_search.rebuild_for_doctype(doctype)
-		results = global_search.search('Every Month')
-		self.assertEqual(len(results), 3)
+		results = global_search.search('Monthly')
+		self.assertEqual(len(results), 2)
 
 	def test_delete_doc(self):
 		self.insert_test_events()
@@ -87,6 +92,7 @@ class TestGlobalSearch(unittest.TestCase):
 		self.assertEqual(len(results), 1)
 
 		frappe.delete_doc('Event', event_name)
+		global_search.sync_global_search()
 
 		results = global_search.search(test_subject)
 		self.assertEqual(len(results), 0)
@@ -111,6 +117,7 @@ class TestGlobalSearch(unittest.TestCase):
 			})
 			doc.insert()
 
+		global_search.sync_global_search()
 		frappe.db.commit()
 
 	def test_get_field_value(self):
@@ -177,3 +184,10 @@ class TestGlobalSearch(unittest.TestCase):
 					field_as_text = global_search.get_formatted_value(doc.description, field)
 
 			self.assertEqual(case["result"], field_as_text)
+
+	def test_web_page_index(self):
+		global_search.update_global_search_for_all_web_pages()
+		global_search.sync_global_search()
+		frappe.db.commit()
+		results = global_search.web_search('unsubscribe')
+		self.assertTrue('Unsubscribe' in results[0].content)

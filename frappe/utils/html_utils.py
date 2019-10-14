@@ -1,3 +1,4 @@
+from __future__ import unicode_literals
 import frappe
 import json, re
 import bleach, bleach_whitelist.bleach_whitelist as bleach_whitelist
@@ -57,7 +58,7 @@ def sanitize_html(html, linkify=False):
 		return html
 
 	tags = (acceptable_elements + svg_elements + mathml_elements
-		+ ["html", "head", "meta", "link", "body", "iframe", "style", "o:p"])
+		+ ["html", "head", "meta", "link", "body", "style", "o:p"])
 	attributes = {"*": acceptable_attributes, 'svg': svg_attributes}
 	styles = bleach_whitelist.all_styles
 	strip_comments = False
@@ -90,6 +91,7 @@ def get_icon_html(icon, small=False):
 		u"(\ud83c[\udde0-\uddff])"
 		"+", flags=re.UNICODE)
 
+	icon = icon or ""
 	if icon and emoji_pattern.match(icon):
 		return '<span class="text-muted">' + icon + '</span>'
 
@@ -158,7 +160,10 @@ acceptable_attributes = [
 	'step', 'style', 'summary', 'suppress', 'tabindex', 'target',
 	'template', 'title', 'toppadding', 'type', 'unselectable', 'usemap',
 	'urn', 'valign', 'value', 'variable', 'volume', 'vspace', 'vrml',
-	'width', 'wrap', 'xml:lang'
+	'width', 'wrap', 'xml:lang', 'data-row', 'data-list', 'data-language',
+	'data-value', 'role', 'frameborder', 'allowfullscreen', 'spellcheck',
+	'data-mode', 'data-gramm', 'data-placeholder', 'data-comment',
+	'data-id', 'data-denotation-char'
 ]
 
 mathml_attributes = [
