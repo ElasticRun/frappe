@@ -314,8 +314,15 @@ class BaseDocument(object):
 		# if doctype is "DocType", don't insert null values as we don't know who is valid yet
 		d = self.get_valid_dict(convert_dates_to_str=True, ignore_nulls = self.doctype in ('DocType', 'DocField', 'DocPerm'))
 
-		columns = list(d)
 		try:
+			# For Postgres, autoincrement name column with NOT NULL constraint
+			# requires the value to be either DEFAULT or that the column should be omitted
+
+			# Omit name column from column list
+			if not self.name and frappe.conf.db_type == 'postgres':
+				d.pop("name", None)
+
+			columns = list(d)
 			frappe.db.sql("""INSERT INTO `tab{doctype}` ({columns})
 					VALUES ({values})""".format(
 					doctype = self.doctype,
@@ -323,7 +330,7 @@ class BaseDocument(object):
 					values = ", ".join(["%s"] * len(columns))
 				), list(d.values()))
 			if self.meta.autoname == "autoincrement":
-				self.name = frappe.db.sql("SELECT last_insert_id() as name;", as_dict=1)[0].name
+				self.name = frappe.db.get_last_insert_id()
 		except Exception as e:
 			if frappe.db.is_primary_key_violation(e):
 				if self.meta.autoname=="hash":
